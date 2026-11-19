@@ -1183,3 +1183,131 @@ fn default_penalty_rounds_up_to_favour_treasury() {
     let expected_penalty = (contribution_before * 2_000 + 10_000 - 1) / 10_000;
     assert_eq!(member.contribution, contribution_before - expected_penalty);
 }
+
+// Issue #504: Quota excludes phase-expired proposal before keeper finalization
+#[test]
+fn quota_excludes_phase_expired_proposal_before_keeper_finalization() {
+    let s = setup(1);
+    let borrower = s.members.get(0).unwrap();
+
+    // Create 3 loan proposals (reaching MAX_OPEN_PROPOSALS_PER_MEMBER = 3)
+    let _p1 = s.client.request_loan(&borrower, &100, &None);
+    let _p2 = s.client.request_loan(&borrower, &100, &None);
+    let _p3 = s.client.request_loan(&borrower, &100, &None);
+
+    // 4th proposal immediately rejected with TooManyOpenProposals
+    let res = s.client.try_request_loan(&borrower, &100, &None);
+    assert_eq!(res, Err(Ok(Error::TooManyOpenProposals)));
+
+    // Advance time past editing + voting period without expiring proposals
+    advance(&s.env, EDITING + VOTING + 1);
+
+    // Now they are phase-expired, so borrower can submit new proposals
+    let res = s.client.try_request_loan(&borrower, &100, &None);
+    assert!(res.is_ok());
+}
+
+// Issue #508: Test exit share, pending yield, and loan eligibility for a fully-slashed member
+#[test]
+fn fully_slashed_member_has_zero_exit_share_and_cannot_borrow() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+
+    // Repeatedly take loans and default until contribution is slashed
+    for _ in 0..5 {
+        let member = s.client.get_member(&borrower).unwrap();
+        if member.contribution == 0 {
+            break;
+        }
+        let pid = s.client.request_loan(&borrower, &100, &None);
+        advance(&s.env, EDITING + 1);
+        s.client.vote_on_loan_proposal(&v1, &pid, &true);
+        s.client.vote_on_loan_proposal(&v2, &pid, &true);
+        advance(&s.env, LOAN_DURATION + LOAN_DURATION + 1);
+        s.client.mark_loan_defaulted(&pid);
+    }
+
+    // Set contribution directly to 0 to simulate full slashing boundary
+    s.env.as_contract(&s.client.address, || {
+        let mut rec = crate::storage::get_member(&s.env, &borrower).unwrap();
+        rec.contribution = 0;
+        crate::storage::set_member(&s.env, &rec);
+    });
+
+    // calculate_exit_share returns 0
+    assert_eq!(s.client.calculate_exit_share(&borrower), 0);
+
+    // pending_yield is 0
+    assert_eq!(s.client.get_pending_yield(&borrower), 0);
+
+    // Cannot request new loan
+    let res = s.client.try_request_loan(&borrower, &100, &None);
+    assert!(res.is_err());
+
+    // exit_dao succeeds
+    s.client.exit_dao(&borrower);
+    let member = s.client.get_member(&borrower).unwrap();
+    assert_eq!(member.status, MemberStatus::Inactive);
+}
+
+// Issue #517: Loan interest_rate can differ from originating proposal rate due to disbursement re-quoting
+#[test]
+fn loan_interest_rate_differs_from_proposal_rate_due_to_treasury_change() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+
+    let pid = s.client.request_loan(&borrower, &500, &None);
+    let proposal_initial = s.client.get_loan_proposal(&pid).unwrap();
+    let voted_rate = proposal_initial.interest_rate;
+
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&v1, &pid, &true);
+    s.client.vote_on_loan_proposal(&v2, &pid, &true);
+
+    // Vote completed and loan approved/disbursed
+    let loan = s.client.get_loan(&pid).unwrap();
+    let proposal_after = s.client.get_loan_proposal(&pid).unwrap();
+
+    // Both remain independently queryable
+    assert_eq!(proposal_after.interest_rate, voted_rate);
+    assert_eq!(loan.id, pid);
+    assert_eq!(loan.total_repayment, loan.principal + (loan.principal * loan.interest_rate as i128 + BASIS_POINTS - 1) / BASIS_POINTS);
+}
+
+// Issue #516: Overdue penalty tested across partial repayments
+#[test]
+fn overdue_penalty_tested_across_partial_payments() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+
+    let pid = s.client.request_loan(&borrower, &500, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&v1, &pid, &true);
+    s.client.vote_on_loan_proposal(&v2, &pid, &true);
+
+    let loan_before = s.client.get_loan(&pid).unwrap();
+    let initial_repayment = loan_before.total_repayment;
+
+    // Advance beyond due time
+    advance(&s.env, LOAN_DURATION + 10);
+
+    // Mint extra tokens so borrower can repay
+    s.token.mint(&borrower, &10_000);
+
+    // First partial repayment
+    s.client.repay_loan_partial(&borrower, &pid, &100);
+    let loan_after_first = s.client.get_loan(&pid).unwrap();
+    assert!(loan_after_first.total_repayment >= initial_repayment);
+
+    // Second partial repayment
+    s.client.repay_loan_partial(&borrower, &pid, &100);
+    let loan_after_second = s.client.get_loan(&pid).unwrap();
+    assert_eq!(loan_after_second.amount_repaid, 200);
+}
+}

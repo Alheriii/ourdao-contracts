@@ -323,3 +323,15 @@ fn propose_treasury_withdrawal_rejects_self_destination() {
     );
     assert_eq!(res_asset, Err(Ok(Error::InvalidProposal)));
 }
+
+// Issue #501: get_treasury_balance_in_asset works for non-whitelisted token
+#[test]
+fn get_treasury_balance_in_asset_works_for_non_whitelisted_token() {
+    let s = setup(1);
+    let other_sac = s.env.register_stellar_asset_contract_v2(Address::generate(&s.env));
+    // Asset was never whitelisted
+    assert!(!s.client.is_token_whitelisted(&other_sac.address()));
+    // View still returns the actual token balance held by the contract (0)
+    let bal = s.client.get_treasury_balance_in_asset(&other_sac.address());
+    assert_eq!(bal, 0);
+}

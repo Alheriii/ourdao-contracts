@@ -362,6 +362,37 @@ fn initialize_accepts_a_real_token() {
     assert_eq!(init_with_token(&env, &sac.address()), Ok(()));
 }
 
+// Issue #499: Failed initialize leaves no partial state and allows subsequent successful initialization
+#[test]
+fn initialize_failure_leaves_no_state_and_allows_subsequent_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(OurDao, ());
+    let client = OurDaoClient::new(&env, &contract_id);
+    let admins = soroban_sdk::vec![&env, Address::generate(&env)];
+    let not_a_token = env.register(OurDao, ());
+
+    // Initial attempt with non-token fails
+    let res = client.try_initialize(&admins, &5_100u32, &FEE, &not_a_token, &policy());
+    assert_eq!(res, Err(Ok(Error::InvalidToken)));
+
+    // Contract remains uninitialized
+    assert!(!client.is_initialized());
+
+    // Subsequent initialize with a valid token succeeds
+    let sac = env.register_stellar_asset_contract_v2(Address::generate(&env));
+    assert_eq!(client.try_initialize(&admins, &5_100u32, &FEE, &sac.address(), &policy()), Ok(Ok(())));
+    assert!(client.is_initialized());
+}
+
+// Issue #497: ProposalVote Copy and Eq/PartialEq derives
+#[test]
+fn proposal_vote_derives_work_as_expected() {
+    let v1 = crate::types::ProposalVote { proposal_id: 1, vote: true };
+    let v2 = v1; // Copy derive test
+    assert_eq!(v1, v2);
+}
+
 // Issue #191: Configurable quorum threshold parameter in LoanPolicy
 #[test]
 fn validate_policy_rejects_quorum_bps_above_basis_points() {

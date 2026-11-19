@@ -22,4 +22,5 @@ Per ADR-0001, accepted decisions are immutable architecture history. Moving an A
 | [0004](./0004-loan-extension.md) | Loan due-date extension proposals | Proposed |
 | [0005](./0005-reputation-rate.md) | Interest discount from member loan history | Proposed |
 | [0008](./0008-early-repayment.md) | Early repayment discount | Proposed |
+| [0009](./0009-max-open-proposals-policy.md) | Evaluation of MAX_OPEN_PROPOSALS_PER_MEMBER in LoanPolicy | Proposed |
 
