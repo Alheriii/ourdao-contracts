@@ -1206,3 +1206,49 @@ fn quota_excludes_phase_expired_proposal_before_keeper_finalization() {
     let res = s.client.try_request_loan(&borrower, &100, &None);
     assert!(res.is_ok());
 }
+
+// Issue #508: Test exit share, pending yield, and loan eligibility for a fully-slashed member
+#[test]
+fn fully_slashed_member_has_zero_exit_share_and_cannot_borrow() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+
+    // Repeatedly take loans and default until contribution is slashed
+    for _ in 0..5 {
+        let member = s.client.get_member(&borrower).unwrap();
+        if member.contribution == 0 {
+            break;
+        }
+        let pid = s.client.request_loan(&borrower, &100, &None);
+        advance(&s.env, EDITING + 1);
+        s.client.vote_on_loan_proposal(&v1, &pid, &true);
+        s.client.vote_on_loan_proposal(&v2, &pid, &true);
+        advance(&s.env, LOAN_DURATION + LOAN_DURATION + 1);
+        s.client.mark_loan_defaulted(&pid);
+    }
+
+    // Set contribution directly to 0 to simulate full slashing boundary
+    s.env.as_contract(&s.client.address, || {
+        let mut rec = crate::storage::get_member(&s.env, &borrower).unwrap();
+        rec.contribution = 0;
+        crate::storage::set_member(&s.env, &rec);
+    });
+
+    // calculate_exit_share returns 0
+    assert_eq!(s.client.calculate_exit_share(&borrower), 0);
+
+    // pending_yield is 0
+    assert_eq!(s.client.get_pending_yield(&borrower), 0);
+
+    // Cannot request new loan
+    let res = s.client.try_request_loan(&borrower, &100, &None);
+    assert!(res.is_err());
+
+    // exit_dao succeeds
+    s.client.exit_dao(&borrower);
+    let member = s.client.get_member(&borrower).unwrap();
+    assert_eq!(member.status, MemberStatus::Inactive);
+}
+}

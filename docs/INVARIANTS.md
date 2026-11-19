@@ -17,6 +17,9 @@ less than or equal to the total `interest` passed to `distribute_interest`.
 Specifically, each member receives exactly `interest / active_members` and the
 remainder (`interest % active_members`) stays in the treasury.
 
+**Interaction with Rebates and Discounts (ADR-0008) (#506):**
+Any future rebate or discount mechanism (such as ADR-0008 early repayment discount or ADR-0005 reputation discount) must only ever reduce the net interest amount passed to `distribute_interest`. Yield must never be credited for interest that was waived or discounted, since waived interest was never collected into the treasury. Implementers of ADR-0008 must ensure that `distribute_interest` receives only `collected_interest`, preserving Invariant A1.
+
 **Tested:** ✅ `tests::properties::distributed_interest_never_exceeds_collected`
 (`contracts/dao/src/tests/properties.rs`)
 
