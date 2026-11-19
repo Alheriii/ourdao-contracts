@@ -1,3 +1,5 @@
+extern crate std;
+
 use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::xdr::{ContractEventBody, ScVal};
 use soroban_sdk::{token, Address, Env, Vec};
@@ -312,6 +314,67 @@ pub fn whitelist_second_asset<'a>(s: &Setup<'a>, funding: i128) -> token::Client
 /// Mints `amount` of `asset` to `to`.
 pub fn mint_asset(s: &Setup, asset: &Address, to: &Address, amount: i128) {
     token::StellarAssetClient::new(&s.env, asset).mint(to, &amount);
+}
+
+// ==================== issue #285: single-token vs *_in_asset(base) ====================
+
+/// Which entrypoint family a #285 equivalence run drives.
+#[derive(Clone, Copy, Debug)]
+pub enum EntryPath {
+    /// The original single-token entrypoints (`request_loan`, `repay_loan`,
+    /// `propose_treasury_withdrawal`).
+    Legacy,
+    /// Their `*_in_asset` counterparts, called with the base token.
+    InBaseAsset,
+}
+
+/// What one call left behind: the events it emitted and every ledger entry
+/// (all contracts' storage and TTLs, token balances included).
+pub type Observation = (
+    std::vec::Vec<soroban_sdk::xdr::ContractEvent>,
+    std::vec::Vec<(
+        std::boxed::Box<soroban_sdk::xdr::LedgerKey>,
+        (std::boxed::Box<soroban_sdk::xdr::LedgerEntry>, Option<u32>),
+    )>,
+);
+
+/// Captures the events of the most recent invocation and the full ledger.
+pub fn observe(env: &Env) -> Observation {
+    (
+        env.events().all().events().to_vec(),
+        env.to_ledger_snapshot().ledger_entries,
+    )
+}
+
+/// First-topic symbol of each event in `events`, in emission order.
+pub fn event_topics(
+    events: &[soroban_sdk::xdr::ContractEvent],
+) -> std::vec::Vec<std::string::String> {
+    events
+        .iter()
+        .filter_map(|e| {
+            let ContractEventBody::V0(body) = &e.body;
+            match body.topics.first() {
+                Some(ScVal::Symbol(sym)) => Some(sym.0.to_utf8_string_lossy()),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// Asserts two runs of the same scenario emitted identical events and left
+/// an identical ledger after every step. The runs use separate `Env`s, so this
+/// only holds because test addresses are generated deterministically.
+pub fn assert_runs_identical(legacy: &[Observation], in_base: &[Observation]) {
+    assert_eq!(
+        legacy.len(),
+        in_base.len(),
+        "runs took different numbers of steps"
+    );
+    for (step, (a, b)) in legacy.iter().zip(in_base).enumerate() {
+        assert_eq!(a.0, b.0, "events differ after step {step}");
+        assert_eq!(a.1, b.1, "ledger state differs after step {step}");
+    }
 }
 
 /// Asserts the most recent `prop_canc` event carries `(proposal_id, now)` as

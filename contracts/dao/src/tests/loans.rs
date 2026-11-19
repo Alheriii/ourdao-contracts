@@ -1183,3 +1183,71 @@ fn default_penalty_rounds_up_to_favour_treasury() {
     let expected_penalty = (contribution_before * 2_000 + 10_000 - 1) / 10_000;
     assert_eq!(member.contribution, contribution_before - expected_penalty);
 }
+
+// ==================== issue #285: single-token loan entrypoints ====================
+
+/// Request → vote → disburse → repay → claim through one entrypoint family,
+/// observing after every call. `overdue` repays past `due_time`, so the
+/// penalty path is compared too.
+fn run_loan_path(path: EntryPath, overdue: bool) -> std::vec::Vec<Observation> {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+    let base = s.token.address.clone();
+    let mut steps = std::vec::Vec::new();
+
+    let pid = match path {
+        EntryPath::Legacy => s.client.request_loan(&borrower, &1_000, &None),
+        EntryPath::InBaseAsset => s
+            .client
+            .request_loan_in_asset(&borrower, &1_000, &base, &None),
+    };
+    steps.push(observe(&s.env));
+
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&v1, &pid, &true);
+    steps.push(observe(&s.env));
+    s.client.vote_on_loan_proposal(&v2, &pid, &true); // approves and disburses
+    steps.push(observe(&s.env));
+
+    if overdue {
+        advance(&s.env, LOAN_DURATION + 1);
+    }
+    match path {
+        EntryPath::Legacy => s.client.repay_loan(&borrower, &pid),
+        EntryPath::InBaseAsset => s.client.repay_loan_in_asset(&borrower, &pid, &base),
+    }
+    steps.push(observe(&s.env));
+    assert_eq!(s.client.get_loan(&pid).unwrap().status, LoanStatus::Repaid);
+
+    // The yield the repayment produced is the same either way.
+    s.client.claim_rewards(&v1);
+    steps.push(observe(&s.env));
+    steps
+}
+
+#[test]
+fn single_token_loan_entrypoints_match_base_asset_counterparts() {
+    for overdue in [false, true] {
+        let legacy = run_loan_path(EntryPath::Legacy, overdue);
+        let in_base = run_loan_path(EntryPath::InBaseAsset, overdue);
+
+        // Every step did real work, so the comparison below isn't vacuous.
+        let topics: std::vec::Vec<_> = legacy.iter().map(|o| event_topics(&o.0)).collect();
+        for (step, expected) in ["loan_req", "loan_vote", "loan_appr", "loan_rpy", "claimed"]
+            .iter()
+            .enumerate()
+        {
+            assert!(
+                topics[step].iter().any(|t| t == expected),
+                "step {step} emitted {:?}, expected {expected}",
+                topics[step]
+            );
+        }
+        // Naming the base token records no loan asset, like the legacy path.
+        assert!(!topics[0].iter().any(|t| t == "loan_asst"));
+
+        assert_runs_identical(&legacy, &in_base);
+    }
+}

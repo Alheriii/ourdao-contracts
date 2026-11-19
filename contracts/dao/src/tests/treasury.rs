@@ -1,3 +1,5 @@
+extern crate std;
+
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{Address, Env, String, Vec};
 
@@ -322,6 +324,61 @@ fn propose_treasury_withdrawal_rejects_self_destination() {
         &false,
     );
     assert_eq!(res_asset, Err(Ok(Error::InvalidProposal)));
+}
+
+// ==================== issue #285: single-token withdrawal entrypoint ====================
+
+/// Propose → vote → vote (executes) through one entrypoint family, observing
+/// after every call.
+fn run_withdrawal_path(path: EntryPath) -> std::vec::Vec<Observation> {
+    let s = setup(3);
+    let proposer = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+    let dest = Address::generate(&s.env);
+    let reason = String::from_str(&s.env, "grant");
+    let mut steps = std::vec::Vec::new();
+
+    let pid = match path {
+        EntryPath::Legacy => s
+            .client
+            .propose_treasury_withdrawal(&proposer, &600, &dest, &reason, &false),
+        EntryPath::InBaseAsset => s.client.propose_withdrawal_in_asset(
+            &proposer,
+            &600,
+            &s.token.address,
+            &dest,
+            &reason,
+            &false,
+        ),
+    };
+    steps.push(observe(&s.env));
+    s.client.vote_on_treasury_proposal(&v1, &pid, &true);
+    steps.push(observe(&s.env));
+    s.client.vote_on_treasury_proposal(&v2, &pid, &true);
+    steps.push(observe(&s.env));
+    assert_eq!(s.token.balance(&dest), 600);
+    steps
+}
+
+#[test]
+fn single_token_withdrawal_entrypoint_matches_base_asset_counterpart() {
+    let legacy = run_withdrawal_path(EntryPath::Legacy);
+    let in_base = run_withdrawal_path(EntryPath::InBaseAsset);
+
+    // Every step did real work, so the comparison below isn't vacuous.
+    let topics: std::vec::Vec<_> = legacy.iter().map(|o| event_topics(&o.0)).collect();
+    for (step, expected) in ["tre_prop", "tre_vote", "tre_exec"].iter().enumerate() {
+        assert!(
+            topics[step].iter().any(|t| t == expected),
+            "step {step} emitted {:?}, expected {expected}",
+            topics[step]
+        );
+    }
+    // Naming the base token records no proposal asset, like the legacy path.
+    assert!(!topics[0].iter().any(|t| t == "tre_asset"));
+
+    assert_runs_identical(&legacy, &in_base);
 }
 
 // ==================== issue #288: treasury reconciliation view ====================
