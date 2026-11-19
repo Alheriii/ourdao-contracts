@@ -242,4 +242,21 @@ proptest! {
         let sum: i128 = members.iter().map(|m| client.calculate_exit_share(&m)).sum();
         prop_assert!(sum <= treasury);
     }
+
+    // Issue #507: quote_terms overflow fallbacks never produce wrapped total_repayment or panic
+    #[test]
+    fn quote_terms_overflow_fallbacks_never_panic_or_wrap(
+        amount in prop::strategy::Union::new([
+            (1i128..1_000_000i128).boxed(),
+            (i128::MAX - 1_000_000..=i128::MAX).boxed(),
+        ]),
+        treasury in prop::strategy::Union::new([
+            (0i128..=10i128).boxed(),
+            (AMOUNT_BOUND..=i128::MAX).boxed(),
+        ]),
+    ) {
+        let (_env, client) = contract_with_treasury(treasury.min(AMOUNT_BOUND));
+        let terms = client.calculate_loan_terms(&amount);
+        prop_assert!(terms.total_repayment >= amount);
+    }
 }
