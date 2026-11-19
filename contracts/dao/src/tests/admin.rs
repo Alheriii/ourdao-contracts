@@ -789,3 +789,79 @@ fn get_version_and_dao_summary_version_always_agree() {
     assert_eq!(v1, summary.version);
     assert_eq!(v1, soroban_sdk::String::from_str(&s.env, env!("CARGO_PKG_VERSION")));
 }
+
+// Issue #526: Parametrized pause guards on entrypoints added since PAUSE_FUNCTIONALITY.md
+#[test]
+fn test_pause_guards_on_newer_entrypoints() {
+    let s = setup(2);
+    let member = s.members.get(0).unwrap();
+    let other = s.members.get(1).unwrap();
+    let token = s.client.get_token();
+
+    // Pause contract
+    s.client.pause(&s.admin);
+    assert!(s.client.is_paused());
+
+    // delegate_vote blocked
+    assert_eq!(
+        s.client.try_delegate_vote(&member, &other),
+        Err(Ok(Error::Paused))
+    );
+
+    // vote_batch blocked
+    let votes = soroban_sdk::vec![&s.env, crate::types::ProposalVote { proposal_id: 1, vote: true }];
+    assert_eq!(
+        s.client.try_vote_batch(&member, &votes),
+        Err(Ok(Error::Paused))
+    );
+
+    // Token whitelist operations blocked
+    let dummy_token = Address::generate(&s.env);
+    assert_eq!(
+        s.client.try_propose_token_addition(&s.admin, &dummy_token),
+        Err(Ok(Error::Paused))
+    );
+    assert_eq!(
+        s.client.try_execute_token_addition(&s.admin, &dummy_token),
+        Err(Ok(Error::Paused))
+    );
+    assert_eq!(
+        s.client.try_remove_token(&s.admin, &dummy_token),
+        Err(Ok(Error::Paused))
+    );
+
+    // Multi-token loan request blocked
+    assert_eq!(
+        s.client.try_request_loan_in_asset(&member, &100, &token, &None),
+        Err(Ok(Error::Paused))
+    );
+
+    // Multi-token withdrawal proposal blocked
+    let reason = soroban_sdk::String::from_str(&s.env, "grant");
+    assert_eq!(
+        s.client.try_propose_withdrawal_in_asset(&member, &100, &token, &other, &reason, &false),
+        Err(Ok(Error::Paused))
+    );
+}
+
+// Issue #524: Removed token balance reporting
+#[test]
+fn removed_token_balance_reporting() {
+    let s = setup(1);
+    let other_sac = s.env.register_stellar_asset_contract_v2(Address::generate(&s.env));
+    let other_token = other_sac.address();
+
+    // Whitelist new token
+    s.client.propose_token_addition(&s.admin, &other_token);
+    advance(&s.env, 48 * 3600 + 1);
+    s.client.execute_token_addition(&s.admin, &other_token);
+    assert!(s.client.is_token_whitelisted(&other_token));
+
+    // Remove token from whitelist
+    s.client.remove_token(&s.admin, &other_token);
+    assert!(!s.client.is_token_whitelisted(&other_token));
+
+    // get_treasury_balance_in_asset reports the token balance accurately
+    assert_eq!(s.client.get_treasury_balance_in_asset(&other_token), 0);
+}
+}

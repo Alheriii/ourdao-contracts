@@ -17,9 +17,14 @@ The original pause implementation only blocked 8 state-changing operations while
 9. `disburse_approved_loan` - prevents loan disbursements
 10. `execute_approved` (treasury) - prevents treasury withdrawals
 11. `expire_loan_proposal` - prevents proposal expiration
+12. `vote_batch` - prevents batch voting while paused (#527)
+13. `delegate_vote` - prevents vote delegation changes while paused (#527)
+14. `propose_token_addition` / `execute_token_addition` / `remove_token` - freezes token whitelist modifications (#527)
+15. `request_loan_in_asset` / `propose_withdrawal_in_asset` - prevents multi-token loan requests and treasury withdrawals (#527)
+16. `seed_state` / `lock_seeding` - prevents migration state seeding while paused (#527)
 
 ### Intentional Exceptions (No Pause Check):
-1. `repay_loan` / `repay_loan_partial` - Borrowers should be able to repay loans even during emergency pauses to avoid being forced into default through no fault of their own.
+1. `repay_loan` / `repay_loan_partial` / `repay_loan_in_asset` - Borrowers should be able to repay loans even during emergency pauses to avoid being forced into default through no fault of their own.
 
 2. Admin functions (`unpause`, `add_admin`, `remove_admin`, `set_pauser`, `revoke_pauser`, `set_consensus_threshold`, `set_policy`) - Governance operations remain available to control the pause state and its authorities.
 
@@ -55,4 +60,4 @@ When `pause()` is called by an admin or the assigned pauser:
 - This ensures that if an exploit is discovered, admins can freeze the contract before value leaves
 
 ## Verification
-All existing tests pass after implementing these changes. The pause functionality now correctly blocks all critical operations that could drain treasury or modify contract state during an emergency stop.
+All existing tests pass after implementing these changes. The pause functionality correctly blocks all critical operations that could drain treasury or modify contract state during an emergency stop. Comprehensive coverage of all newer entrypoints is exercised by `test_pause_guards_on_newer_entrypoints` in `contracts/dao/src/tests/admin.rs` (#526).
