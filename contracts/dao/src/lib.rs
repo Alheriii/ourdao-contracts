@@ -33,6 +33,7 @@ mod bench;
 use soroban_sdk::{contract, contractimpl, Address, Bytes, BytesN, Env, String, Vec};
 use types::{
     AssetBalance, DaoSummary, SeedDocEntry, SeedNameEntry, SeedStakeEntry, SeedYieldEntry,
+    TreasuryAccounting,
 };
 
 pub use error::Error;
@@ -467,6 +468,21 @@ impl OurDao {
     /// Returns the treasury balance held in a specific whitelisted asset.
     pub fn get_treasury_balance_in_asset(env: Env, asset: Address) -> i128 {
         util::treasury_balance_in_asset(&env, &asset)
+    }
+
+    /// Reconciliation view for `asset` (#288): the contract's actual token
+    /// balance, how much of it is member stake, and the principal still owed
+    /// on active loans in that asset. `token_balance - staked` equals
+    /// `get_treasury_balance_in_asset`; comparing these figures against the
+    /// indexed event history exposes drift or direct donations. Also answers
+    /// for a removed asset, whose loans may still be outstanding.
+    pub fn get_treasury_accounting(env: Env, asset: Address) -> Result<TreasuryAccounting, Error> {
+        util::require_initialized(&env)?;
+        Ok(TreasuryAccounting {
+            token_balance: util::treasury_balance_for(&env, &asset),
+            staked: util::staked_in_asset(&env, &asset),
+            outstanding_principal: storage::get_outstanding_principal(&env, &asset),
+        })
     }
 
     pub fn get_total_members(env: Env) -> u32 {

@@ -128,7 +128,17 @@ pub fn seed_loans(env: &Env, caller: soroban_sdk::Address, loans: Vec<Loan>) -> 
     storage::extend_instance(env);
 
     for loan in loans.iter() {
+        // Keep the per-asset outstanding principal (#288) in step. Re-seeding
+        // an id replaces what it contributed before rather than adding to it.
+        let before = storage::get_loan(env, loan.id)
+            .map(|prev| crate::loans::principal_outstanding(&prev))
+            .unwrap_or(0);
         storage::set_loan(env, &loan);
+        storage::adjust_outstanding_principal(
+            env,
+            &storage::get_loan_asset(env, loan.id),
+            crate::loans::principal_outstanding(&loan) - before,
+        );
         // Ensure the next-id counter won't reuse this id.
         storage::set_next_proposal_id_at_least(env, loan.id + 1);
     }

@@ -150,3 +150,35 @@ fn ttl_extended_for_name_on_write() {
     });
     assert_eq!(ttl_owner, PERSISTENT_BUMP);
 }
+
+#[test]
+fn ttl_extended_for_outstanding_principal_on_write_and_read() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+
+    let pid = s.client.request_loan(&borrower, &1_000, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&v1, &pid, &true);
+    s.client.vote_on_loan_proposal(&v2, &pid, &true);
+
+    let key = DataKey::OutstandingPrincipal(s.token.address.clone());
+    let ttl_after_write = s.env.as_contract(&s.client.address, || {
+        s.env.storage().persistent().get_ttl(&key)
+    });
+    assert_eq!(ttl_after_write, PERSISTENT_BUMP);
+
+    let advance_ledgers = DAY_IN_LEDGERS + 10;
+    s.env.ledger().with_mut(|li| {
+        li.sequence_number += advance_ledgers;
+    });
+
+    // Reading it through the reconciliation view extends the TTL back.
+    let acct = s.client.get_treasury_accounting(&s.token.address);
+    assert_eq!(acct.outstanding_principal, 1_000);
+    let ttl_after_read = s.env.as_contract(&s.client.address, || {
+        s.env.storage().persistent().get_ttl(&key)
+    });
+    assert_eq!(ttl_after_read, PERSISTENT_BUMP);
+}

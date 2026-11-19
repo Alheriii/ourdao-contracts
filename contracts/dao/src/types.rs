@@ -189,6 +189,22 @@ pub struct DaoSummary {
     pub version: String,
 }
 
+/// Per-asset reconciliation figures returned by `get_treasury_accounting`
+/// (#288), so auditors can compare what the contract accounts for against
+/// what it actually holds.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TreasuryAccounting {
+    /// The contract's actual balance of the asset, as reported by its token.
+    pub token_balance: i128,
+    /// Portion of `token_balance` held as member stake. Staking only happens
+    /// in the base token, so this is zero for every other asset.
+    pub staked: i128,
+    /// Principal still owed on `Active` loans in the asset. Lent out, so not
+    /// part of `token_balance`.
+    pub outstanding_principal: i128,
+}
+
 /// Computed loan terms returned by the read-only quote helper.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]

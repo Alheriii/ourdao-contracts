@@ -55,6 +55,28 @@ inconsistency; tracking issue: open as follow-up (#134).
 
 ---
 
+### A5 — Outstanding principal per asset matches the active loans in it
+**Statement:** For every asset, `get_treasury_accounting(asset).outstanding_principal`
+equals the principal still owed on `Active` loans denominated in that asset.
+Repayments cover interest first, so a loan owes
+`principal - (amount_repaid - min(amount_repaid, total_repayment - principal))`.
+An overdue penalty is booked as principal, so it counts until it is paid. A
+default writes off whatever is still owed. Loans added through `seed_loans`
+count too, and re-seeding an id replaces its previous contribution instead of
+adding to it.
+
+The same view reports the asset's actual `token_balance` and the `staked`
+portion of it (base token only). `token_balance - staked` is the spendable
+treasury. Any balance the indexed event history doesn't explain, such as a
+direct transfer to the contract, is drift.
+
+**Tested:** ✅ `tests::treasury::treasury_accounting_matches_manual_calculation`,
+`tests::treasury::seeded_loans_count_towards_outstanding_principal`,
+`tests::loans::loan_lifecycle_in_second_asset`
+(`contracts/dao/src/tests/`)
+
+---
+
 ## Lifecycle invariants
 
 ### L1 — `loan_id == proposal_id`

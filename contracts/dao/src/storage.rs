@@ -83,6 +83,10 @@ pub(crate) enum DataKey {
     /// Set (to `true`) once by `lock_seeding`; never cleared. Seed entrypoints
     /// reject any call made after this flag is present (#332/#333).
     MigrationSeedingLocked,
+    // ---- treasury reconciliation (#288) ----
+    /// Principal still owed on `Active` loans denominated in this asset.
+    /// Absent means zero.
+    OutstandingPrincipal(Address),
 }
 
 pub fn extend_instance(env: &Env) {
@@ -623,6 +627,31 @@ pub fn get_treasury_asset(env: &Env, id: u32) -> Address {
 pub fn set_treasury_asset(env: &Env, id: u32, asset: &Address) {
     let key = DataKey::TreasuryAsset(id);
     env.storage().persistent().set(&key, asset);
+    extend_persistent(env, &key);
+}
+
+// ---------- treasury reconciliation (#288) ----------
+
+/// Principal still owed to the treasury on `Active` loans in `asset`.
+pub fn get_outstanding_principal(env: &Env, asset: &Address) -> i128 {
+    let key = DataKey::OutstandingPrincipal(asset.clone());
+    match env.storage().persistent().get(&key) {
+        Some(amount) => {
+            extend_persistent(env, &key);
+            amount
+        }
+        None => 0,
+    }
+}
+
+/// Moves `asset`'s outstanding principal by `delta`; a zero delta writes nothing.
+pub fn adjust_outstanding_principal(env: &Env, asset: &Address, delta: i128) {
+    if delta == 0 {
+        return;
+    }
+    let key = DataKey::OutstandingPrincipal(asset.clone());
+    let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+    env.storage().persistent().set(&key, &(current + delta));
     extend_persistent(env, &key);
 }
 
