@@ -320,3 +320,16 @@ fn pending_yield_view_matches_claim_rewards_payout() {
     s.client.exit_dao(&v2);
     assert_eq!(s.token.balance(&v2) - before, share + shown);
 }
+
+// Issue #525: calculate_exit_share for an address that has never registered
+#[test]
+fn calculate_exit_share_for_unregistered_address() {
+    let s = setup(1);
+    let unknown = Address::generate(&s.env);
+
+    // Unregistered address has None in get_member
+    assert_eq!(s.client.get_member(&unknown), None);
+
+    // calculate_exit_share returns 0 without erroring or trapping
+    assert_eq!(s.client.calculate_exit_share(&unknown), 0);
+}
