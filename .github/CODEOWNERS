@@ -24,5 +24,8 @@ Cargo.lock         @precious-akpan @bbjiggy @0xMegie @stephanieefeakpokrire-droi
 # Workflows, Dependabot config and this file.
 .github/  @precious-akpan @bbjiggy @0xMegie @stephanieefeakpokrire-droid
 
+# Architecture Decision Records review gate (#520)
+docs/adr/ @precious-akpan @bbjiggy @0xMegie @stephanieefeakpokrire-droid
+
 # Static assets: binaries and fonts can hide a payload a script loads.
 public/  @precious-akpan @bbjiggy @0xMegie @stephanieefeakpokrire-droid
