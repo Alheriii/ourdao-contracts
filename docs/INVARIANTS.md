@@ -77,6 +77,28 @@ direct transfer to the contract, is drift.
 
 ---
 
+### A6 — A default slashes the base-token contribution, whatever the loan's asset
+**Statement:** `mark_loan_defaulted` behaves the same for a loan in a non-base
+asset as for a base-token loan:
+
+- The claim that is slashed is the borrower's `contribution`, which is their
+  share of the **base-token** treasury at exit (`calculate_exit_share`). It is
+  cut by `default_penalty_bps`, rounded up and capped at the contribution. The
+  cut is a fraction of the contribution, not of the loan, so it depends on
+  neither the loan's size nor its asset.
+- No tokens move. The borrower keeps the unpaid principal, and the treasury
+  of the loan's own asset absorbs the loss. That asset's outstanding principal
+  (A5) is written off. Nothing is recovered from the base token.
+- The borrower forfeits their unclaimed base-token yield (#89).
+- Members have no exit claim on non-base assets, so a default in asset B only
+  reduces the borrower's base-token exit share.
+
+**Tested:** ✅ `tests::loans::default_in_second_asset` (non-base asset),
+`tests::loans::loan_default_applies_penalty_and_frees_borrower` (base token)
+(`contracts/dao/src/tests/loans.rs`)
+
+---
+
 ## Lifecycle invariants
 
 ### L1 — `loan_id == proposal_id`

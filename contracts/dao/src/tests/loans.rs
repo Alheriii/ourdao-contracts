@@ -1251,3 +1251,111 @@ fn single_token_loan_entrypoints_match_base_asset_counterparts() {
         assert_runs_identical(&legacy, &in_base);
     }
 }
+
+// ==================== issue #287: default of a loan in a non-base asset ====================
+
+#[test]
+fn default_in_second_asset() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+    let asset = whitelist_second_asset(&s, 10_000);
+
+    // Give every member unclaimed base-token yield first, so the forfeiture
+    // on default is observable.
+    let base_pid = s.client.request_loan(&v1, &1_000, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&v2, &base_pid, &true);
+    s.client.vote_on_loan_proposal(&borrower, &base_pid, &true);
+    s.client.repay_loan(&v1, &base_pid);
+    let accrued = s.client.get_pending_yield(&borrower);
+    assert!(accrued > 0);
+
+    let pid = s
+        .client
+        .request_loan_in_asset(&borrower, &4_000, &asset.address, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&v1, &pid, &true);
+    s.client.vote_on_loan_proposal(&v2, &pid, &true);
+    let loan = s.client.get_loan(&pid).unwrap();
+    assert_eq!(loan.principal, 4_000);
+
+    let base_treasury = s.client.get_treasury_balance();
+    let asset_treasury = s.client.get_treasury_balance_in_asset(&asset.address);
+    let borrower_asset = asset.balance(&borrower);
+    let contribution_before = s.client.get_member(&borrower).unwrap().contribution;
+    assert_eq!(
+        s.client
+            .get_treasury_accounting(&asset.address)
+            .outstanding_principal,
+        4_000
+    );
+
+    advance(&s.env, LOAN_DURATION + 1); // past due_time, grace period is 0
+    s.client.mark_loan_defaulted(&pid);
+    let default_events = s.env.events().all();
+    assert_eq!(
+        s.client.get_loan(&pid).unwrap().status,
+        LoanStatus::Defaulted
+    );
+
+    // The slashed claim is the borrower's base-token `contribution` (their
+    // share of the base treasury at exit), cut by `default_penalty_bps`
+    // exactly as for a base-token default. Nothing in asset B is slashed.
+    let expected_penalty = (contribution_before * 2_000 + 10_000 - 1) / 10_000;
+    let member = s.client.get_member(&borrower).unwrap();
+    assert_eq!(member.contribution, contribution_before - expected_penalty);
+    assert!(!member.has_active_loan);
+    assert_eq!(member.active_loans, 0);
+    let dflt = default_events
+        .events()
+        .iter()
+        .find(|e| event_topics(core::slice::from_ref(*e)) == ["loan_dflt"])
+        .expect("loan_dflt event not found");
+    let ContractEventBody::V0(body) = &dflt.body;
+    let ScVal::Vec(Some(data)) = &body.data else {
+        panic!("unexpected loan_dflt data: {:?}", body.data);
+    };
+    assert_eq!(data[0], ScVal::U32(pid));
+    assert_eq!(
+        data[2],
+        ScVal::I128(soroban_sdk::xdr::Int128Parts {
+            hi: 0,
+            lo: expected_penalty as u64,
+        })
+    );
+
+    // No tokens move on default. The borrower keeps the asset-B principal and
+    // the asset-B treasury absorbs the loss: the outstanding principal is
+    // written off, not recovered from the base token.
+    assert_eq!(asset.balance(&borrower), borrower_asset);
+    assert_eq!(
+        s.client.get_treasury_balance_in_asset(&asset.address),
+        asset_treasury
+    );
+    assert_eq!(s.client.get_treasury_balance(), base_treasury);
+    assert_eq!(
+        s.client
+            .get_treasury_accounting(&asset.address)
+            .outstanding_principal,
+        0
+    );
+
+    // Unclaimed base-token yield is forfeited; everyone else keeps theirs.
+    assert_eq!(s.client.get_pending_yield(&borrower), 0);
+    assert_eq!(s.client.get_pending_yield(&v2), accrued);
+
+    // The reduced contribution shrinks the base-token exit share. The exit
+    // share never includes asset B, so exiting pays out base token only.
+    let expected_share = base_treasury * member.contribution / (3 * FEE - expected_penalty);
+    assert_eq!(s.client.calculate_exit_share(&borrower), expected_share);
+    let borrower_base = s.token.balance(&borrower);
+    s.client.exit_dao(&borrower);
+    assert_eq!(s.token.balance(&borrower), borrower_base + expected_share);
+    assert_eq!(asset.balance(&borrower), borrower_asset);
+    assert_eq!(
+        s.client.get_treasury_balance_in_asset(&asset.address),
+        asset_treasury
+    );
+}
