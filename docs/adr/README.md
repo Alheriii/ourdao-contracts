@@ -10,6 +10,10 @@ Copy [`TEMPLATE.md`](./TEMPLATE.md), choose the next number, and add the
 record to the index below. Keep the status (`Proposed`, `Accepted`,
 `Superseded`, or `Deprecated`) and link the superseding ADR when applicable.
 
+## Review Gate for ADR Status Changes (#520)
+
+Per ADR-0001, accepted decisions are immutable architecture history. Moving an ADR's status from `Proposed` to `Accepted` requires explicit sign-off from at least two project maintainers recorded in the approving PR review. Changes to `docs/adr/` are protected via `.github/CODEOWNERS`.
+
 ## Index
 
 | ADR | Title | Status |

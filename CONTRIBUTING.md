@@ -141,6 +141,9 @@ To keep review time going to real contributions, the following are closed on sig
 
 **Do not open a public issue for a security vulnerability.** See [SECURITY.md](./SECURITY.md) for scope, how to report privately, and our response commitment.
 
+### Audit Preparation Snapshot Refresh (#522)
+The open security findings snapshot in [`docs/AUDIT_PREPARATION.md`](./docs/AUDIT_PREPARATION.md) must be refreshed quarterly and verified prior to any external security audit engagement. Maintainers are responsible for reconciling each referenced issue's current status and documenting the resolution or decision in the table.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the [MIT License](./LICENSE) that covers this project.

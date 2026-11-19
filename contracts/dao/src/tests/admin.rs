@@ -748,3 +748,13 @@ fn pauser_can_pause_but_cannot_unpause() {
     // Revoked pauser can no longer pause
     assert_eq!(s.client.try_pause(&pauser), Err(Ok(Error::NotAdmin)));
 }
+
+// Issue #523: Test that get_version and get_dao_summary().version always agree
+#[test]
+fn get_version_and_dao_summary_version_always_agree() {
+    let s = setup(1);
+    let v1 = s.client.get_version();
+    let summary = s.client.get_dao_summary();
+    assert_eq!(v1, summary.version);
+    assert_eq!(v1, soroban_sdk::String::from_str(&s.env, env!("CARGO_PKG_VERSION")));
+}
