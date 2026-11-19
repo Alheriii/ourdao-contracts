@@ -288,8 +288,15 @@ pub fn set_member(env: &Env, member: &Member) {
 /// Bound how many unclosed proposals one member may have at a time.
 pub const MAX_OPEN_PROPOSALS_PER_MEMBER: u32 = 3;
 
-/// Refresh the member's quota from authoritative proposal states. Expired
-/// pending records do not consume quota even when no keeper has finalized them.
+/// Refresh the member's quota from authoritative proposal states and cache it (#502).
+///
+/// NOTE on storage write side effect: Although named `get_open_proposals`, this
+/// function intentionally scans authoritative proposals and unconditionally writes
+/// the recalculated open-proposal count into `DataKey::OpenProposals(member)` persistent
+/// storage. This ensures the quota cache is refreshed whenever proposal state
+/// transitions occur, allowing any subsequent quota check to rely on an up-to-date
+/// cached value without stale reads.
+/// Expired pending records do not consume quota even when no keeper has finalized them.
 pub fn get_open_proposals(env: &Env, member: &Address) -> u32 {
     let now = env.ledger().timestamp();
     let mut count: u32 = 0;
