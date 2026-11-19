@@ -61,3 +61,34 @@ fn document_hash_65_bytes_rejected() {
     let res = s.client.try_attach_document(&member, &ProposalKind::Loan, &pid, &hash_65);
     assert_eq!(res, Err(Ok(Error::DocumentTooLarge)));
 }
+
+// Issue #513: attach_document tests for treasury proposals specifically
+#[test]
+fn attach_document_treasury_proposal_proposer_and_non_proposer() {
+    let s = setup(2);
+    let proposer = s.members.get(0).unwrap();
+    let stranger = s.members.get(1).unwrap();
+    let dest = soroban_sdk::Address::generate(&s.env);
+    let reason = soroban_sdk::String::from_str(&s.env, "grant for community event");
+
+    let pid = s
+        .client
+        .propose_treasury_withdrawal(&proposer, &500, &dest, &reason, &false);
+
+    let cid = Bytes::from_array(&s.env, b"QmTreasuryProposalCid123");
+
+    // Stranger cannot attach document (NotProposalOwner)
+    let res = s.client.try_attach_document(&stranger, &ProposalKind::Treasury, &pid, &cid);
+    assert_eq!(res, Err(Ok(Error::NotProposalOwner)));
+
+    // Proposer can attach document
+    let res = s.client.try_attach_document(&proposer, &ProposalKind::Treasury, &pid, &cid);
+    assert!(res.is_ok());
+    assert_eq!(s.client.get_document(&ProposalKind::Treasury, &pid), Some(cid.clone()));
+
+    // Document can be overwritten again mid-voting
+    let cid2 = Bytes::from_array(&s.env, b"QmTreasuryProposalCid456");
+    let res2 = s.client.try_attach_document(&proposer, &ProposalKind::Treasury, &pid, &cid2);
+    assert!(res2.is_ok());
+    assert_eq!(s.client.get_document(&ProposalKind::Treasury, &pid), Some(cid2));
+}
