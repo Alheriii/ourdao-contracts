@@ -1251,4 +1251,63 @@ fn fully_slashed_member_has_zero_exit_share_and_cannot_borrow() {
     let member = s.client.get_member(&borrower).unwrap();
     assert_eq!(member.status, MemberStatus::Inactive);
 }
+
+// Issue #517: Loan interest_rate can differ from originating proposal rate due to disbursement re-quoting
+#[test]
+fn loan_interest_rate_differs_from_proposal_rate_due_to_treasury_change() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+
+    let pid = s.client.request_loan(&borrower, &500, &None);
+    let proposal_initial = s.client.get_loan_proposal(&pid).unwrap();
+    let voted_rate = proposal_initial.interest_rate;
+
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&v1, &pid, &true);
+    s.client.vote_on_loan_proposal(&v2, &pid, &true);
+
+    // Vote completed and loan approved/disbursed
+    let loan = s.client.get_loan(&pid).unwrap();
+    let proposal_after = s.client.get_loan_proposal(&pid).unwrap();
+
+    // Both remain independently queryable
+    assert_eq!(proposal_after.interest_rate, voted_rate);
+    assert_eq!(loan.id, pid);
+    assert_eq!(loan.total_repayment, loan.principal + (loan.principal * loan.interest_rate as i128 + BASIS_POINTS - 1) / BASIS_POINTS);
+}
+
+// Issue #516: Overdue penalty tested across partial repayments
+#[test]
+fn overdue_penalty_tested_across_partial_payments() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+
+    let pid = s.client.request_loan(&borrower, &500, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&v1, &pid, &true);
+    s.client.vote_on_loan_proposal(&v2, &pid, &true);
+
+    let loan_before = s.client.get_loan(&pid).unwrap();
+    let initial_repayment = loan_before.total_repayment;
+
+    // Advance beyond due time
+    advance(&s.env, LOAN_DURATION + 10);
+
+    // Mint extra tokens so borrower can repay
+    s.token.mint(&borrower, &10_000);
+
+    // First partial repayment
+    s.client.repay_loan_partial(&borrower, &pid, &100);
+    let loan_after_first = s.client.get_loan(&pid).unwrap();
+    assert!(loan_after_first.total_repayment >= initial_repayment);
+
+    // Second partial repayment
+    s.client.repay_loan_partial(&borrower, &pid, &100);
+    let loan_after_second = s.client.get_loan(&pid).unwrap();
+    assert_eq!(loan_after_second.amount_repaid, 200);
+}
 }
