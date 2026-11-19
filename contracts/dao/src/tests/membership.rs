@@ -320,3 +320,72 @@ fn pending_yield_view_matches_claim_rewards_payout() {
     s.client.exit_dao(&v2);
     assert_eq!(s.token.balance(&v2) - before, share + shown);
 }
+
+// Issue #510: Two-hop delegation chain is single-level / non-transitive
+#[test]
+fn two_hop_delegation_chain_is_non_transitive() {
+    let s = setup(3);
+    let a = s.members.get(0).unwrap();
+    let b = s.members.get(1).unwrap();
+    let c = s.members.get(2).unwrap();
+
+    // A delegates to B, B delegates to C
+    s.client.delegate_vote(&a, &b);
+    s.client.delegate_vote(&b, &c);
+
+    // B delegated away, so B has 0 voting weight
+    s.env.as_contract(&s.client.address, || {
+        assert_eq!(crate::util::voting_weight(&s.env, &b), 0);
+    });
+
+    // C only directly receives B's vote, not A's transitive vote (single-level)
+    s.env.as_contract(&s.client.address, || {
+        // Base vote 100 + B's base vote 100 = 200
+        assert_eq!(crate::util::voting_weight(&s.env, &c), 200);
+    });
+}
+
+// Issue #511: Delegation state across exit and rejoin
+#[test]
+fn delegation_state_across_exit_and_rejoin() {
+    let s = setup(2);
+    let a = s.members.get(0).unwrap();
+    let b = s.members.get(1).unwrap();
+
+    s.client.delegate_vote(&a, &b);
+    assert_eq!(s.client.get_delegate(&a), Some(b.clone()));
+
+    // A exits
+    s.client.exit_dao(&a);
+
+    // Rejoin
+    s.token.mint(&a, &FEE);
+    s.client.register_member(&a);
+
+    // Check delegate status after rejoin
+    let d = s.client.get_delegate(&a);
+    assert_eq!(d, Some(b.clone()));
+}
+
+// Issue #512: Voting weight ignores delegations from inactive (exited) members
+#[test]
+fn voting_weight_ignores_delegations_from_inactive_members() {
+    let s = setup(2);
+    let a = s.members.get(0).unwrap();
+    let b = s.members.get(1).unwrap();
+
+    s.client.delegate_vote(&a, &b);
+
+    // Before exit: B has weight 200 (100 base + 100 from A)
+    s.env.as_contract(&s.client.address, || {
+        assert_eq!(crate::util::voting_weight(&s.env, &b), 200);
+    });
+
+    // A exits
+    s.client.exit_dao(&a);
+
+    // After exit: B has weight 100 (A's delegation ignored because A is inactive)
+    s.env.as_contract(&s.client.address, || {
+        assert_eq!(crate::util::voting_weight(&s.env, &b), 100);
+    });
+}

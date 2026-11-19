@@ -104,7 +104,11 @@ pub fn voting_weight(env: &Env, who: &Address) -> i128 {
     for member in storage::get_members(env).iter() {
         if let Some(delegatee) = storage::get_delegation(env, &member) {
             if delegatee == *who {
-                total += BASE_VOTE_WEIGHT + stake_boost(storage::get_stake(env, &member));
+                if let Some(m) = storage::get_member(env, &member) {
+                    if m.status == MemberStatus::ActiveMember {
+                        total += BASE_VOTE_WEIGHT + stake_boost(storage::get_stake(env, &member));
+                    }
+                }
             }
         }
     }
