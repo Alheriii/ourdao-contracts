@@ -3,7 +3,7 @@ use soroban_sdk::{symbol_short, Address, Env, String, Vec};
 use crate::error::Error;
 use crate::storage;
 use crate::types::{
-    Loan, LoanProposal, LoanStatus, LoanTerms, LoanTermsEdited, MemberStatus, ProposalPhase,
+    Loan, LoanProposal, LoanStatus, LoanTerms, MemberStatus, ProposalPhase,
     ProposalStatus, BASIS_POINTS,
 };
 use crate::util;
@@ -212,15 +212,6 @@ pub fn edit_loan_proposal(
     proposal.last_edited_at = Some(now);
     storage::set_loan_proposal(env, &proposal);
 
-    let _structured = LoanTermsEdited {
-        proposal_id,
-        borrower: borrower.clone(),
-        prev_amount,
-        prev_total_repayment,
-        new_amount,
-        total_repayment: terms.total_repayment,
-        edited_at: now,
-    };
     env.events().publish(
         (symbol_short!("loan_edit"),),
         (proposal_id, borrower, new_amount, terms.total_repayment),

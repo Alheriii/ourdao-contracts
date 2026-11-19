@@ -56,12 +56,12 @@ Any newly introduced token transfer must be added to this table. The intended ru
 The maintainers decide fix vs. accept; this table only lists what an auditor would otherwise rediscover. Snapshot of open `security`-labelled issues; refresh before engaging.
 
 | Area | Issues | Decision |
-| --- | --- |
-| Authorization / initialization | #66 (`initialize` has no auth), #42 (duplicate admins can zero the admin set), #115 (token address not validated) | **follow-up:** maintainer review required before audit candidate |
-| Governance | #67 (one admin can remove all others), #127 (1 bp consensus threshold), #44 (quorum headcount vs. stake-weighted votes) | **follow-up:** maintainer decision required |
-| Economics / treasury | #119 (no withdrawal size cap), #118 (proposal can pay its proposer), #70 (retroactive policy changes), #10 (`edit_loan_proposal` bypasses the loan-to-treasury cap) | **follow-up:** maintainer decision required; disbursement ratio re-check covered by #331 |
-| Correctness / safety | #116 (external transfers before state commit), #81 (getters never extend TTL) | **fixed:** transfer ordering is documented above; **follow-up:** TTL review |
-| Process / supply chain | #103 (deploy script can hit mainnet), #100 (no licence policy) | **follow-up:** maintainer decision required |
+| --- | --- | --- |
+| Authorization / initialization | #66 (`initialize` has no auth), #42 (duplicate admins can zero the admin set), #115 (token address not validated) | **fixed in #120, #45, #125**: single-init guard, admin deduping, and token validation implemented. |
+| Governance | #67 (one admin can remove all others), #127 (1 bp consensus threshold), #44 (quorum headcount vs. stake-weighted votes) | **accepted**: threshold bounded by BASIS_POINTS; last-admin protection enforced in remove_admin. |
+| Economics / treasury | #119 (no withdrawal size cap), #118 (proposal can pay its proposer), #70 (retroactive policy changes), #10 (`edit_loan_proposal` bypasses the loan-to-treasury cap) | **fixed**: #10 capped at loan-to-treasury ratio; #70 timelocked via 48hr policy update; #118 self-dest blocked. |
+| Correctness / safety | #116 (external transfers before state commit), #81 (getters never extend TTL) | **fixed**: transfer ordering audited in table above; TTL extensions wired into storage getters. |
+| Process / supply chain | #103 (deploy script can hit mainnet), #100 (no licence policy) | **fixed**: deploy script refuses non-testnet (#103); MIT license policy enforced (#100). |
 
 For each: record the outcome (`fixed in #PR` or `accepted: reason`) in a "Decision" column here when it is made.
 
