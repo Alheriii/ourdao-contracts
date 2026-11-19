@@ -1184,6 +1184,29 @@ fn default_penalty_rounds_up_to_favour_treasury() {
     assert_eq!(member.contribution, contribution_before - expected_penalty);
 }
 
+// Issue #504: Quota excludes phase-expired proposal before keeper finalization
+#[test]
+fn quota_excludes_phase_expired_proposal_before_keeper_finalization() {
+    let s = setup(1);
+    let borrower = s.members.get(0).unwrap();
+
+    // Create 3 loan proposals (reaching MAX_OPEN_PROPOSALS_PER_MEMBER = 3)
+    let _p1 = s.client.request_loan(&borrower, &100, &None);
+    let _p2 = s.client.request_loan(&borrower, &100, &None);
+    let _p3 = s.client.request_loan(&borrower, &100, &None);
+
+    // 4th proposal immediately rejected with TooManyOpenProposals
+    let res = s.client.try_request_loan(&borrower, &100, &None);
+    assert_eq!(res, Err(Ok(Error::TooManyOpenProposals)));
+
+    // Advance time past editing + voting period without expiring proposals
+    advance(&s.env, EDITING + VOTING + 1);
+
+    // Now they are phase-expired, so borrower can submit new proposals
+    let res = s.client.try_request_loan(&borrower, &100, &None);
+    assert!(res.is_ok());
+}
+
 // Issue #508: Test exit share, pending yield, and loan eligibility for a fully-slashed member
 #[test]
 fn fully_slashed_member_has_zero_exit_share_and_cannot_borrow() {
@@ -1227,4 +1250,5 @@ fn fully_slashed_member_has_zero_exit_share_and_cannot_borrow() {
     s.client.exit_dao(&borrower);
     let member = s.client.get_member(&borrower).unwrap();
     assert_eq!(member.status, MemberStatus::Inactive);
+}
 }
