@@ -122,9 +122,12 @@ All entrypoints are on the `OurDao` contract (`lib.rs`). Errors are the numeric 
 | `add_admin(caller, admin)` / `remove_admin(caller, admin)` | Admin-only. The last admin can never be removed. |
 | `set_consensus_threshold(caller, threshold)` | Admin-only, basis points. |
 | `set_loan_policy(caller, policy)` | Admin-only. |
-| `pause(caller)` / `unpause(caller)` | Admin-only emergency stop. |
+| `execute_policy_update(caller)` / `cancel_policy_update(caller)` / `try_execute_policy_update()` | Admin-only 48h timelock policy update execution and cancellation. |
+| `pause(caller)` / `unpause(caller)` | Admin-only emergency stop (pauser can also pause). |
+| `set_pauser(caller, pauser)` / `revoke_pauser(caller)` | Admin-only management of emergency pauser address. |
 | `propose_token_addition(caller, token)` / `execute_token_addition(caller, token)` | Admin-only. Whitelists an extra treasury asset after the 48h `TIMELOCK_DURATION`. The base `token` is always whitelisted. |
 | `remove_token(caller, token)` | Admin-only. Blocks new loans/withdrawals in `token`; loans already issued in it stay repayable. The base token can't be removed. |
+| `bump_dao_ttl()` | Extends the contract instance and core storage TTL. |
 
 **Membership**
 
@@ -133,6 +136,7 @@ All entrypoints are on the `OurDao` contract (`lib.rs`). Errors are the numeric 
 | `register_member(member)` | Pays the membership fee, joins the DAO. |
 | `exit_dao(member)` | Withdraws pro-rata share + stake + pending yield. Blocked while `has_active_loan`. |
 | `claim_rewards(member)` | Withdraws accrued loan-interest yield. |
+| `delegate_vote(delegator, delegatee)` | Delegates voting power to another active member (single-level). |
 
 **Lending**
 
@@ -143,6 +147,8 @@ All entrypoints are on the `OurDao` contract (`lib.rs`). Errors are the numeric 
 | `edit_loan_proposal(borrower, proposal_id, new_amount)` | Only during the editing window, only the borrower. |
 | `cancel_loan_proposal(borrower, proposal_id)` | Only during the editing window, only the borrower. |
 | `vote_on_loan_proposal(voter, proposal_id, support)` | Auto-approves and disburses at the consensus threshold. |
+| `vote_batch(voter, votes)` | Casts votes across multiple loan/treasury proposals in one call. |
+| `disburse_approved_loan(loan_id)` | Disburses an approved loan's funds. |
 | `repay_loan(borrower, loan_id)` | Collects the full outstanding balance in one transaction. |
 | `repay_loan_in_asset(borrower, loan_id, asset)` | `repay_loan` that fails with `AssetMismatch` unless `asset` is the loan's own asset. Interest on a non-base-asset loan stays in the treasury instead of being distributed as yield. |
 | `repay_loan_partial(borrower, loan_id, amount)` | Collects up to `amount` of the outstanding balance. Applies to accrued interest first, then principal; the loan flips to repaid only once the balance reaches exactly zero. |
@@ -157,6 +163,14 @@ All entrypoints are on the `OurDao` contract (`lib.rs`). Errors are the numeric 
 | `propose_withdrawal_in_asset(proposer, amount, asset, destination, reason, private) -> proposal_id` | Same as `propose_treasury_withdrawal`, paid out in a whitelisted `asset`. (Soroban caps entrypoint names at 32 characters, hence no `treasury_` prefix.) |
 | `cancel_treasury_proposal(proposer, proposal_id)` | Only the proposer, only while pending and within the policy's editing period. |
 | `vote_on_treasury_proposal(voter, proposal_id, support)` | Auto-executes at 60% consensus. Rejected on a private proposal — use commit/reveal instead. |
+| `execute_treasury_proposal(proposal_id)` | Executes an approved treasury withdrawal proposal. |
+
+**Migration / State Seeding (#332)**
+
+| Method | Description |
+|---|---|
+| `seed_members(entries)` / `seed_stakes(entries)` / `seed_pending_yield(entries)` / `seed_loans(entries)` / `seed_names(entries)` / `seed_docs(entries)` | Admin-only migration state seeding entrypoints. |
+| `lock_seeding()` / `is_seeding_locked() -> bool` | Permanently locks seeding upon migration completion. |
 
 **Staking**
 
@@ -198,7 +212,7 @@ The *k*-th bonus vote starts at `k² × 100` staked tokens, so the thresholds ar
 | `attach_document(caller, kind, proposal_id, content_hash)` | Anchors an off-chain content hash (e.g. IPFS CID) to a real loan/treasury proposal. |
 | `get_document(kind, proposal_id) -> Option<Bytes>` | View. |
 
-**Views** — `get_member`, `get_loan`, `get_loan_proposal` (auto-refreshes expired phase), `get_treasury_proposal`, `get_loan_policy`, `get_admins`, `is_admin`, `is_member`, `is_eligible_for_loan`, `get_treasury_balance`, `get_treasury_balance_in_asset(asset)`, `is_token_whitelisted(token)`, `get_whitelisted_tokens`, `get_total_members`, `get_active_members`, `get_consensus_threshold`, `get_token`, `get_dao_summary` (all headline state in one call), `is_paused`, `get_stake`, `get_pending_yield`, `calculate_loan_terms`, `calculate_exit_share`, `has_voted(kind, proposal_id, voter)`.
+**Views** — `get_member`, `get_member_overview`, `get_loan`, `get_loan_proposal` (auto-refreshes expired phase), `get_loan_proposal_count`, `get_treasury_proposal`, `get_treasury_proposal_count`, `get_loan_policy`, `get_pending_policy_update`, `get_admins`, `is_admin`, `is_member`, `is_eligible_for_loan`, `get_treasury_balance`, `get_treasury_balance_in_asset(asset)`, `is_token_whitelisted(token)`, `get_whitelisted_tokens`, `get_total_members`, `get_active_members`, `get_consensus_threshold`, `get_token`, `get_version`, `get_dao_summary` (all headline state in one call), `is_paused`, `get_stake`, `get_stake_weight_unit`, `get_max_stake_bonus`, `get_pending_yield`, `get_delegate`, `list_members`, `list_treasury_proposals`, `calculate_loan_terms`, `calculate_exit_share`, `has_voted(kind, proposal_id, voter)`.
 
 > **Note on Treasury Balance Views (#500, #501)**: `get_treasury_balance` and `get_treasury_balance_in_asset` report the DAO's lendable treasury balance, explicitly excluding staked member deposits for the base token to maintain invariant L1. Raw, stake-inclusive token balance is not exposed as a separate entrypoint because external audit/reconciliation tools can query the token contract's standard `balance(&dao_address)` directly. Furthermore, `get_treasury_balance_in_asset(asset)` (#501) is not restricted to whitelisted assets; it reads the contract's actual balance for any queried asset address.
 
