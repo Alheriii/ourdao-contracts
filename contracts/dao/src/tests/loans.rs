@@ -1359,3 +1359,151 @@ fn default_in_second_asset() {
         asset_treasury
     );
 }
+
+// ==================== issue #286: full lifecycle of a loan in a non-base asset ====================
+
+#[test]
+fn loan_lifecycle_in_second_asset() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+    let base = s.token.address.clone();
+    let b = whitelist_second_asset(&s, 10_000);
+    let dao = s.client.address.clone();
+
+    // Base-token yield from an earlier base loan, so the claim at the end
+    // pays something and shows the asset-B loan never changed it.
+    let base_pid = s.client.request_loan(&v1, &1_000, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&v2, &base_pid, &true);
+    s.client.vote_on_loan_proposal(&borrower, &base_pid, &true);
+    s.client.repay_loan(&v1, &base_pid);
+    let base_yield = s.client.get_pending_yield(&v2);
+    assert!(base_yield > 0);
+
+    let base_treasury = s.client.get_treasury_balance();
+    let borrower_base = s.token.balance(&borrower);
+    let assert_base_untouched = || {
+        assert_eq!(s.client.get_treasury_balance(), base_treasury);
+        assert_eq!(s.token.balance(&borrower), borrower_base);
+        assert_eq!(s.client.get_pending_yield(&v2), base_yield);
+        assert_eq!(
+            s.client
+                .get_treasury_accounting(&base)
+                .outstanding_principal,
+            0
+        );
+    };
+    let outstanding_b = || {
+        s.client
+            .get_treasury_accounting(&b.address)
+            .outstanding_principal
+    };
+
+    // 1. Request: sized and priced against asset B's 10_000 treasury.
+    // ratio 2_000 bps → rate 500 + 300 = 800 → interest 160.
+    let pid = s
+        .client
+        .request_loan_in_asset(&borrower, &2_000, &b.address, &None);
+    let quoted = s.client.get_loan_proposal(&pid).unwrap();
+    assert_eq!(quoted.interest_rate, 800);
+    assert_eq!(quoted.total_repayment, 2_160);
+    assert_eq!(b.balance(&dao), 10_000);
+    assert_eq!(b.balance(&borrower), 0);
+    assert_eq!(outstanding_b(), 0);
+    assert_base_untouched();
+
+    // 2. Edit: re-quoted against asset B, not the much smaller base treasury
+    // (which would price 3_000 at the 20% cap).
+    // ratio 3_000 bps → rate 500 + 450 = 950 → interest 285.
+    s.client.edit_loan_proposal(&borrower, &pid, &3_000);
+    let edited = s.client.get_loan_proposal(&pid).unwrap();
+    assert_eq!(edited.amount, 3_000);
+    assert_eq!(edited.interest_rate, 950);
+    assert_eq!(edited.total_repayment, 3_285);
+    assert_ne!(
+        s.client.calculate_loan_terms(&3_000).interest_rate,
+        edited.interest_rate
+    );
+    assert_eq!(b.balance(&dao), 10_000);
+    assert_eq!(b.balance(&borrower), 0);
+    assert_base_untouched();
+
+    // 3. Vote: an asset-B withdrawal leaves too little B to fund the loan,
+    // so the approved proposal waits for disbursement instead of paying out.
+    let dest = Address::generate(&s.env);
+    let reason = String::from_str(&s.env, "drain asset b");
+    let tid = s
+        .client
+        .propose_withdrawal_in_asset(&v1, &8_000, &b.address, &dest, &reason, &false);
+    s.client.vote_on_treasury_proposal(&v1, &tid, &true);
+    s.client.vote_on_treasury_proposal(&v2, &tid, &true);
+    assert_eq!(b.balance(&dest), 8_000);
+    assert_eq!(b.balance(&dao), 2_000);
+
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&v1, &pid, &true);
+    s.client.vote_on_loan_proposal(&v2, &pid, &true);
+    assert!(emitted(&s.env, "loan_wait"));
+    assert_eq!(
+        s.client.get_loan_proposal(&pid).unwrap().status,
+        ProposalStatus::ApprovedPendingDisbursement
+    );
+    assert!(s.client.get_loan(&pid).is_none());
+    assert_eq!(b.balance(&dao), 2_000);
+    assert_eq!(b.balance(&borrower), 0);
+    assert_eq!(outstanding_b(), 0);
+    assert_base_untouched();
+
+    // 4. Disburse: once asset B is topped up, the same proposal pays out in B.
+    mint_asset(&s, &b.address, &dao, 8_000);
+    s.client.disburse_approved_loan(&pid);
+    let loan = s.client.get_loan(&pid).unwrap();
+    assert_eq!(loan.status, LoanStatus::Active);
+    assert_eq!(loan.principal, 3_000);
+    assert_eq!(loan.total_repayment, 3_285);
+    assert_eq!(b.balance(&borrower), 3_000);
+    assert_eq!(b.balance(&dao), 7_000);
+    assert_eq!(
+        s.client.get_treasury_accounting(&b.address),
+        crate::types::TreasuryAccounting {
+            token_balance: 7_000,
+            staked: 0,
+            outstanding_principal: 3_000,
+        }
+    );
+    assert_base_untouched();
+
+    // 5. Partial repay in B: interest (285) first, then 1_000 of principal.
+    mint_asset(&s, &b.address, &borrower, 285);
+    s.client.repay_loan_partial(&borrower, &pid, &1_285);
+    let loan = s.client.get_loan(&pid).unwrap();
+    assert_eq!(loan.status, LoanStatus::Active);
+    assert_eq!(loan.amount_repaid, 1_285);
+    assert_eq!(b.balance(&borrower), 2_000);
+    assert_eq!(b.balance(&dao), 8_285);
+    assert_eq!(outstanding_b(), 2_000);
+    // Interest paid in asset B is not distributed as base-token yield.
+    assert_base_untouched();
+
+    // 6. Full repay, naming asset B.
+    s.client.repay_loan_in_asset(&borrower, &pid, &b.address);
+    assert_eq!(s.client.get_loan(&pid).unwrap().status, LoanStatus::Repaid);
+    assert!(!s.client.get_member(&borrower).unwrap().has_active_loan);
+    assert_eq!(b.balance(&borrower), 0);
+    assert_eq!(b.balance(&dao), 10_285);
+    assert_eq!(outstanding_b(), 0);
+    assert_base_untouched();
+
+    // 7. Yield claim: pays exactly the base-token yield accrued before the
+    // asset-B loan, in the base token. The asset-B interest (285) is not
+    // distributed and stays in the asset-B treasury; per-asset yield is #271.
+    let v2_base = s.token.balance(&v2);
+    assert_eq!(s.client.claim_rewards(&v2), base_yield);
+    assert_eq!(s.token.balance(&v2), v2_base + base_yield);
+    assert_eq!(b.balance(&v2), 0);
+    assert_eq!(s.client.get_pending_yield(&v2), 0);
+    assert_eq!(b.balance(&dao), 10_285);
+    assert_eq!(s.client.get_treasury_balance(), base_treasury - base_yield);
+}
