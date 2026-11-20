@@ -136,10 +136,14 @@ To keep review time going to real contributions, the following are closed on sig
 - Unrelated dependency bumps bundled into a feature or fix.
 - Generated or AI-authored changes whose author can't explain the diff when asked in review. The policy is outcome-based, not tool-based — use whatever tools you like, but you're accountable for understanding and defending what you submit.
 - Changes with no accompanying test, where the change affects contract behavior.
+- Additions to individual member views (`get_stake`, `get_pending_yield`, `get_member_loan_stats`, `name_of`, `get_delegate`) without updating the aggregated `MemberOverview` view accordingly.
 
 ## Reporting a security issue
 
 **Do not open a public issue for a security vulnerability.** See [SECURITY.md](./SECURITY.md) for scope, how to report privately, and our response commitment.
+
+### Audit Preparation Snapshot Refresh (#522)
+The open security findings snapshot in [`docs/AUDIT_PREPARATION.md`](./docs/AUDIT_PREPARATION.md) must be refreshed quarterly and verified prior to any external security audit engagement. Maintainers are responsible for reconciling each referenced issue's current status and documenting the resolution or decision in the table.
 
 ## License
 

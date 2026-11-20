@@ -222,6 +222,11 @@ pub fn member_overview(env: &Env, member: &Address) -> Result<MemberOverview, Er
     })
 }
 
+/// Delegates `delegator`'s voting power to `delegatee` (#510).
+///
+/// NOTE: Delegation in OurDAO is strictly single-level (non-transitive) by design.
+/// In a chain A -> B -> C, B has delegated their vote away, while C only receives
+/// direct delegations (e.g. from B). A's vote does not transitively transfer to C.
 #[allow(deprecated)]
 pub fn delegate_vote(env: &Env, delegator: Address, delegatee: Address) -> Result<(), Error> {
     util::require_initialized(env)?;

@@ -64,6 +64,18 @@ pub struct Member {
 
 /// Everything the DAO knows about one member, returned by
 /// `get_member_overview` in a single call.
+///
+/// Convenience aggregation view combining independently queryable fields:
+/// - `member`: general member status and metadata
+/// - `stake`: matches `get_stake`
+/// - `pending_yield`: matches `get_pending_yield`
+/// - `loan_stats`: matches `get_member_loan_stats`
+/// - `name`: matches `name_of`
+/// - `delegate`: matches `get_delegate`
+///
+/// Maintenance obligation: Every future addition to any of the underlying
+/// individual member views must have a matching field added here to ensure
+/// the aggregate view remains in sync.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MemberOverview {
@@ -247,7 +259,7 @@ pub struct StakingRewardClaimed {
 }
 
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProposalVote {
     pub proposal_id: u32,
     pub vote: bool,
