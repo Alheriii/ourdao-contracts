@@ -260,3 +260,118 @@ proptest! {
         prop_assert!(terms.total_repayment >= amount);
     }
 }
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn distribute_interest_preserves_tokens(
+        active in 1u32..=8,
+        interest in 0i128..=AMOUNT_BOUND,
+    ) {
+        let (env, client) = contract_with_treasury(0);
+        let contract_id = client.address.clone();
+
+        let mut members = Vec::new(&env);
+        for _ in 0..active {
+            let member = Address::generate(&env);
+            let mint = token::StellarAssetClient::new(
+                &env,
+                &client.get_token(),
+            );
+            mint.mint(&member, &FEE);
+            client.register_member(&member);
+            members.push_back(member);
+        }
+
+        let asset = client.get_token();
+        env.as_contract(&contract_id, || {
+            crate::loans::distribute_interest(&env, interest, &asset);
+        });
+
+        let per_member = interest / active as i128;
+        let remainder = interest % active as i128;
+        let mut paid = 0i128;
+
+        for member in members.iter() {
+            let pending = client.get_pending_yield(&member);
+            prop_assert_eq!(pending, per_member);
+            paid = paid.checked_add(pending).unwrap_or(paid);
+        }
+
+        prop_assert!(paid <= interest);
+        prop_assert_eq!(interest - paid, remainder);
+
+        let retained = env.as_contract(&contract_id, || {
+            crate::storage::get_yield_remainder(&env)
+        });
+        prop_assert_eq!(retained, remainder);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(40))]
+
+    #[test]
+    fn member_counters_match_member_records_across_join_exit_rejoin(
+        joins in prop::collection::vec(
+            prop::bool::ANY,
+            1..=12,
+        ),
+    ) {
+        let s = setup(0);
+
+        for rejoin in joins {
+            let member = Address::generate(&s.env);
+            let mint = token::StellarAssetClient::new(
+                &s.env,
+                &s.client.get_token(),
+            );
+            mint.mint(&member, &MINT);
+
+            s.client.register_member(&member);
+            prop_assert_eq!(s.client.get_active_members(), 1);
+            prop_assert_eq!(s.client.get_total_members(), 1);
+
+            s.client.exit_dao(&member);
+            prop_assert_eq!(s.client.get_active_members(), 0);
+
+            if rejoin {
+                mint.mint(&member, &FEE);
+                s.client.register_member(&member);
+                prop_assert_eq!(s.client.get_active_members(), 1);
+                prop_assert_eq!(s.client.get_total_members(), 1);
+
+                s.env.as_contract(&s.client.address, || {
+                    let record = crate::storage::get_member(&s.env, &member).unwrap();
+                    prop_assert_eq!(record.status, MemberStatus::ActiveMember);
+                });
+            }
+        }
+
+        s.env.as_contract(&s.client.address, || {
+            let addresses = crate::storage::get_members(&s.env);
+            let mut active_count = 0u32;
+            let mut record_count = 0u32;
+
+            for address in addresses.iter() {
+                if let Some(record) =
+                    crate::storage::get_member(&s.env, &address)
+                {
+                    record_count += 1;
+                    if record.status == MemberStatus::ActiveMember {
+                        active_count += 1;
+                    }
+                }
+            }
+
+            prop_assert_eq!(
+                crate::storage::get_total_members(&s.env),
+                record_count
+            );
+            prop_assert_eq!(
+                crate::storage::get_active_members(&s.env),
+                active_count
+            );
+        });
+    }
+}
