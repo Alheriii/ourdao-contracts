@@ -164,7 +164,7 @@ sweep "Pass 2: loan proposal expiry" get_loan_proposal_count get_loan_proposal \
 
 sweep "Pass 3: treasury proposal expiry" get_treasury_proposal_count get_treasury_proposal \
   expire_treasury_proposal proposal_id \
-  '.status == "Pending" and (($now | tonumber) > (.created_at | tonumber) + (.voting_period | tonumber))'
+  '.status == "Pending" and (($now | tonumber) > (.created_at | tonumber) + ((.voting_period | tonumber) * (if .private then 2 else 1 end)))'
 
 echo ""
 if ((DRY_RUN)); then
