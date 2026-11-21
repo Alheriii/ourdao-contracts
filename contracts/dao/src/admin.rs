@@ -134,21 +134,22 @@ pub fn set_pauser(env: &Env, caller: Address, pauser: Address) -> Result<(), Err
     if storage::get_pauser(env).as_ref() == Some(&pauser) {
         return Err(Error::AlreadyPauser);
     }
+    let old_pauser = storage::get_pauser(env);
     storage::set_pauser(env, &pauser);
     extend_instance(env);
-    env.events().publish((symbol_short!("pset"),), pauser);
+    env.events()
+        .publish((symbol_short!("pset"),), (old_pauser, pauser));
     Ok(())
 }
 
 #[allow(deprecated)]
 pub fn revoke_pauser(env: &Env, caller: Address) -> Result<(), Error> {
     util::require_admin(env, &caller)?;
-    if storage::get_pauser(env).is_none() {
-        return Err(Error::NotPauser);
-    }
+    let old_pauser = storage::get_pauser(env).ok_or(Error::NotPauser)?;
     storage::remove_pauser(env);
     extend_instance(env);
-    env.events().publish((symbol_short!("prev"),), caller);
+    env.events()
+        .publish((symbol_short!("prev"),), (old_pauser, caller));
     Ok(())
 }
 

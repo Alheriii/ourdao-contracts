@@ -54,23 +54,31 @@
     "pset": {
       "type": "object",
       "properties": {
-        "pauser": {
+        "old_pauser": {
+          "type": ["string", "null"],
+          "format": "address"
+        },
+        "new_pauser": {
           "type": "string",
           "format": "address"
         }
       },
-      "required": ["pauser"],
+      "required": ["old_pauser", "new_pauser"],
       "additionalProperties": false
     },
     "prev": {
       "type": "object",
       "properties": {
+        "old_pauser": {
+          "type": "string",
+          "format": "address"
+        },
         "caller": {
           "type": "string",
           "format": "address"
         }
       },
-      "required": ["caller"],
+      "required": ["old_pauser", "caller"],
       "additionalProperties": false
     },
     "threshold": {

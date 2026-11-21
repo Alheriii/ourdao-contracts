@@ -21,6 +21,7 @@
 #
 # Options:
 #   --dry-run             Read state and print what would be submitted. Submits nothing.
+#   --json                Print one JSON summary object on stdout. Progress goes to stderr.
 #   --network <name>      Network to run against (default: testnet).
 #   -h, --help            Show this help.
 #
@@ -43,6 +44,7 @@ NETWORK="${NETWORK:-testnet}"
 IDENTITY="${IDENTITY:-ourdao-keeper}"
 CONTRACT_ID=""
 DRY_RUN=0
+JSON=0
 DUE=0
 SUBMITTED=0
 FAILED=0
@@ -59,6 +61,7 @@ usage() {
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=1 ;;
+    --json) JSON=1 ;;
     --network)
       [[ $# -ge 2 ]] || die "--network needs a value"
       NETWORK="$2"
@@ -126,8 +129,25 @@ sweep() {
   done
 }
 
+# emit_json <paused: true|false>: print the run summary on stdout (--json only).
+emit_json() {
+  if ((JSON)); then
+    jq -n --arg contract "${CONTRACT_ID}" --arg network "${NETWORK}" \
+      --argjson paused "$1" --argjson dry_run "${DRY_RUN}" \
+      --argjson due "${DUE}" --argjson submitted "${SUBMITTED}" --argjson failed "${FAILED}" \
+      '{contract: $contract, network: $network, paused: $paused, dry_run: ($dry_run == 1),
+        due: $due, submitted: $submitted, failed: $failed}' >&3
+  fi
+}
+
+# With --json, progress goes to stderr and stdout is reserved for the summary.
+if ((JSON)); then
+  exec 3>&1 1>&2
+fi
+
 if [[ "$(view is_paused)" == "true" ]]; then
   echo "==> Contract is paused; keeper passes are blocked until it is unpaused. Nothing submitted."
+  emit_json true
   exit 0
 fi
 
@@ -144,7 +164,7 @@ sweep "Pass 2: loan proposal expiry" get_loan_proposal_count get_loan_proposal \
 
 sweep "Pass 3: treasury proposal expiry" get_treasury_proposal_count get_treasury_proposal \
   expire_treasury_proposal proposal_id \
-  '.status == "Pending" and (($now | tonumber) > (.created_at | tonumber) + (.voting_period | tonumber))'
+  '.status == "Pending" and (($now | tonumber) > (.created_at | tonumber) + ((.voting_period | tonumber) * (if .private then 2 else 1 end)))'
 
 echo ""
 if ((DRY_RUN)); then
@@ -152,4 +172,5 @@ if ((DRY_RUN)); then
 else
   echo "==> Done: ${DUE} due, ${SUBMITTED} submitted, ${FAILED} failed."
 fi
+emit_json false
 ((FAILED == 0)) || exit 1

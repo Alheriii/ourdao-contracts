@@ -560,6 +560,12 @@ impl OurDao {
         storage::get_whitelisted_tokens(&env)
     }
 
+    /// Returns the ledger time at which `token`'s pending addition can be
+    /// executed, or `None` if no addition is pending for it.
+    pub fn get_pending_token_addition(env: Env, token: Address) -> Option<u64> {
+        storage::get_pending_token_addition(&env, &token)
+    }
+
     pub fn is_paused(env: Env) -> bool {
         storage::is_paused(&env)
     }
