@@ -1,4 +1,4 @@
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Ledger as _};
 use soroban_sdk::{Address, BytesN, String};
 
 use super::common::*;
@@ -214,4 +214,120 @@ fn copied_commitment_cannot_be_revealed_by_another_voter() {
         Err(Ok(Error::CommitmentMismatch)),
     );
     s.client.reveal_treasury_vote(&first, &pid, &true, &salt);
+}
+
+// ===========================================================================
+// Issues #475 and #476: reveal pre-check and shared window boundaries
+// ===========================================================================
+
+#[test]
+fn verify_commitment_precheck_matches_reveal_outcome() {
+    let s = setup(3);
+    let proposer = s.members.get(0).unwrap();
+    let voter = s.members.get(1).unwrap();
+    let other = s.members.get(2).unwrap();
+    let destination = Address::generate(&s.env);
+    let reason = String::from_str(&s.env, "private grant");
+    let pid = s
+        .client
+        .propose_treasury_withdrawal(&proposer, &300, &destination, &reason, &true);
+
+    let salt = BytesN::from_array(&s.env, &[7u8; 32]);
+    let wrong_salt = BytesN::from_array(&s.env, &[9u8; 32]);
+    assert!(!s.client.verify_commitment(&voter, &pid, &true, &salt));
+
+    let commitment = compute_commitment(&s.env, &voter, pid, true, &salt);
+    s.client.commit_treasury_vote(&voter, &pid, &commitment);
+
+    assert!(s.client.verify_commitment(&voter, &pid, &true, &salt));
+    assert!(!s.client.verify_commitment(&voter, &pid, &false, &salt));
+    assert!(!s.client.verify_commitment(&voter, &pid, &true, &wrong_salt));
+    assert!(!s.client.verify_commitment(&other, &pid, &true, &salt));
+
+    advance(&s.env, VOTING_PERIOD + 1);
+
+    assert_eq!(
+        s.client
+            .try_reveal_treasury_vote(&voter, &pid, &false, &salt),
+        Err(Ok(Error::CommitmentMismatch)),
+    );
+    assert!(!s.client.verify_commitment(&voter, &pid, &false, &salt));
+
+    assert_eq!(
+        s.client
+            .try_reveal_treasury_vote(&other, &pid, &true, &salt),
+        Err(Ok(Error::NoCommitment)),
+    );
+    assert!(!s.client.verify_commitment(&other, &pid, &true, &salt));
+
+    s.client.reveal_treasury_vote(&voter, &pid, &true, &salt);
+    assert!(!s.client.verify_commitment(&voter, &pid, &true, &salt));
+    assert_eq!(
+        s.client
+            .try_reveal_treasury_vote(&voter, &pid, &true, &salt),
+        Err(Ok(Error::AlreadyRevealed)),
+    );
+}
+
+#[test]
+fn get_commit_reveal_window_matches_enforced_boundaries() {
+    let s = setup(5);
+    let proposer = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+    let too_late = s.members.get(3).unwrap();
+    let destination = Address::generate(&s.env);
+    let reason = String::from_str(&s.env, "private grant");
+    let pid = s
+        .client
+        .propose_treasury_withdrawal(&proposer, &300, &destination, &reason, &true);
+
+    let (commit_end, reveal_end) = s.client.get_commit_reveal_window(&pid);
+    let created_at = s.client.get_treasury_proposal(&pid).unwrap().created_at;
+    assert_eq!(commit_end, created_at + VOTING_PERIOD);
+    assert_eq!(reveal_end, commit_end + VOTING_PERIOD);
+
+    let salt1 = BytesN::from_array(&s.env, &[1u8; 32]);
+    let salt2 = BytesN::from_array(&s.env, &[2u8; 32]);
+    let salt3 = BytesN::from_array(&s.env, &[3u8; 32]);
+    let c1 = compute_commitment(&s.env, &v1, pid, true, &salt1);
+    let c2 = compute_commitment(&s.env, &v2, pid, true, &salt2);
+    let c3 = compute_commitment(&s.env, &too_late, pid, true, &salt3);
+
+    s.env.ledger().with_mut(|li| li.timestamp = commit_end);
+    s.client.commit_treasury_vote(&v1, &pid, &c1);
+    s.client.commit_treasury_vote(&v2, &pid, &c2);
+    assert_eq!(
+        s.client.try_reveal_treasury_vote(&v1, &pid, &true, &salt1),
+        Err(Ok(Error::NotYetRevealed)),
+    );
+
+    s.env.ledger().with_mut(|li| li.timestamp = commit_end + 1);
+    assert_eq!(
+        s.client.try_commit_treasury_vote(&too_late, &pid, &c3),
+        Err(Ok(Error::VotingEnded)),
+    );
+    s.client.reveal_treasury_vote(&v1, &pid, &true, &salt1);
+
+    s.env.ledger().with_mut(|li| li.timestamp = reveal_end + 1);
+    assert_eq!(
+        s.client.try_reveal_treasury_vote(&v2, &pid, &true, &salt2),
+        Err(Ok(Error::VotingEnded)),
+    );
+}
+
+#[test]
+fn get_commit_reveal_window_rejects_public_proposal() {
+    let s = setup(2);
+    let proposer = s.members.get(0).unwrap();
+    let destination = Address::generate(&s.env);
+    let reason = String::from_str(&s.env, "public grant");
+    let pid = s
+        .client
+        .propose_treasury_withdrawal(&proposer, &300, &destination, &reason, &false);
+
+    assert_eq!(
+        s.client.try_get_commit_reveal_window(&pid),
+        Err(Ok(Error::NotAuthorized)),
+    );
 }

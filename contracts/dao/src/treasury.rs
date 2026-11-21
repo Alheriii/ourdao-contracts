@@ -1,6 +1,7 @@
 use soroban_sdk::{symbol_short, Address, Env, String};
 
 use crate::error::Error;
+use crate::privacy;
 use crate::storage;
 use crate::types::{ProposalStatus, TreasuryProposal};
 use crate::util;
@@ -123,7 +124,7 @@ pub fn tally(
     // lifecycle: once VOTING_PERIOD has elapsed since creation, persist the
     // Expired status and reject further votes.
     let voting_end = if proposal.private {
-        proposal.created_at + proposal.voting_period.saturating_mul(2)
+        privacy::commit_reveal_window(&proposal).1
     } else {
         proposal.created_at + proposal.voting_period
     };
@@ -242,12 +243,22 @@ pub fn cancel_treasury_proposal(
         .publish((symbol_short!("prop_canc"),), (proposal_id, now));
     Ok(())
 }
+
+// `env.events().publish` is deprecated in soroban-sdk in favour of
+// `#[contractevent]`, but migration is a coordinated, breaking wire-format
+// change (#85).  Suppress per-function so unrelated deprecations still surface.
+#[allow(deprecated)]
 pub fn expire_treasury_proposal(env: &Env, proposal_id: u32) -> Result<(), Error> {
     util::require_initialized(env)?;
     util::require_not_paused(env)?;
     let mut proposal =
         storage::get_treasury_proposal(env, proposal_id).ok_or(Error::TreasuryProposalNotFound)?;
 
+    // Keep keeper retries idempotent: a proposal already persisted as Expired
+    // is a no-op and must not emit a second event.
+    if proposal.status == ProposalStatus::Expired {
+        return Ok(());
+    }
     if proposal.status != ProposalStatus::Pending {
         return Err(Error::NotInVotingPhase); // Re-using error
     }
@@ -255,7 +266,10 @@ pub fn expire_treasury_proposal(env: &Env, proposal_id: u32) -> Result<(), Error
     if env.ledger().timestamp() > proposal.created_at + proposal.voting_period {
         proposal.status = ProposalStatus::Expired;
         storage::set_treasury_proposal(env, &proposal);
-        // Emitting an event would be nice but not strictly required.
+        env.events().publish(
+            (symbol_short!("tre_exp"),),
+            (proposal_id, proposal.proposer),
+        );
         Ok(())
     } else {
         Err(Error::NotInVotingPhase) // Re-using error

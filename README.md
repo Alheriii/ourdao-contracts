@@ -204,6 +204,8 @@ The *k*-th bonus vote starts at `k² × 100` staked tokens, so the thresholds ar
 |---|---|
 | `commit_treasury_vote(voter, proposal_id, commitment)` | `commitment = sha256(XDR(voter) ++ proposal_id_be ++ support_byte ++ salt)`. |
 | `reveal_treasury_vote(voter, proposal_id, support, salt)` | Verifies the commitment, then tallies through the shared path. |
+| `verify_commitment(voter, proposal_id, support, salt) -> bool` | Read-only reveal pre-check; `false` when no commitment matches. |
+| `get_commit_reveal_window(proposal_id) -> Result<(u64, u64), Error>` | `(commit_end, reveal_end)` for a private proposal; `NotAuthorized` for a public one. |
 
 **Content-hash documents**
 
@@ -212,7 +214,7 @@ The *k*-th bonus vote starts at `k² × 100` staked tokens, so the thresholds ar
 | `attach_document(caller, kind, proposal_id, content_hash)` | Anchors an off-chain content hash (e.g. IPFS CID) to a real loan/treasury proposal. |
 | `get_document(kind, proposal_id) -> Option<Bytes>` | View. |
 
-**Views** — `get_member`, `get_member_overview`, `get_loan`, `get_loan_proposal` (auto-refreshes expired phase), `get_loan_proposal_count`, `get_treasury_proposal`, `get_treasury_proposal_count`, `get_loan_policy`, `get_pending_policy_update`, `get_admins`, `is_admin`, `is_member`, `is_eligible_for_loan`, `get_treasury_balance`, `get_treasury_balance_in_asset(asset)`, `is_token_whitelisted(token)`, `get_whitelisted_tokens`, `get_total_members`, `get_active_members`, `get_consensus_threshold`, `get_token`, `get_version`, `get_dao_summary` (all headline state in one call), `is_paused`, `get_stake`, `get_stake_weight_unit`, `get_max_stake_bonus`, `get_pending_yield`, `get_delegate`, `list_members`, `list_treasury_proposals`, `calculate_loan_terms`, `calculate_exit_share`, `has_voted(kind, proposal_id, voter)`.
+**Views** — `get_member`, `get_member_overview`, `get_loan`, `get_loan_proposal` (auto-refreshes expired phase), `get_loan_proposal_count`, `get_treasury_proposal`, `get_treasury_proposal_count`, `get_loan_policy`, `get_pending_policy_update`, `get_admins`, `is_admin`, `is_member`, `is_eligible_for_loan`, `get_treasury_balance`, `get_treasury_balance_in_asset(asset)`, `is_token_whitelisted(token)`, `get_whitelisted_tokens`, `get_total_members`, `get_active_members`, `get_consensus_threshold`, `get_token`, `get_version`, `get_dao_summary` (all headline state in one call), `is_paused`, `get_stake`, `get_stake_weight_unit`, `get_max_stake_bonus`, `get_pending_yield`, `get_delegate`, `list_members`, `list_treasury_proposals`, `calculate_loan_terms`, `calculate_exit_share`, `has_voted(kind, proposal_id, voter)`, `verify_commitment(voter, proposal_id, support, salt)`, `get_commit_reveal_window(proposal_id)`.
 
 > **Note on Treasury Balance Views (#500, #501)**: `get_treasury_balance` and `get_treasury_balance_in_asset` report the DAO's lendable treasury balance, explicitly excluding staked member deposits for the base token to maintain invariant L1. Raw, stake-inclusive token balance is not exposed as a separate entrypoint because external audit/reconciliation tools can query the token contract's standard `balance(&dao_address)` directly. Furthermore, `get_treasury_balance_in_asset(asset)` (#501) is not restricted to whitelisted assets; it reads the contract's actual balance for any queried asset address.
 
@@ -240,6 +242,7 @@ Every state-changing call publishes an event, which `ourdao-backend` indexes sin
 | `tre_prop` | `(id, amount, destination, private)` | `propose_treasury_withdrawal` |
 | `tre_vote` | `(id, voter, support)` | `vote_on_treasury_proposal` |
 | `tre_exec` | `(id, amount, destination)` | auto-fired on execution |
+| `tre_exp` | `(proposal_id, proposer)` | `expire_treasury_proposal` (permissionless keeper) |
 | `loan_asst` / `tre_asset` | `(id, asset)` | `request_loan_in_asset` / `propose_withdrawal_in_asset`, only when `asset` isn't the base token |
 | `prop_canc` | `(proposal_id, timestamp)` | `cancel_loan_proposal` / `cancel_treasury_proposal` |
 | `tok_prop` | `(caller, token, execution_time)` | `propose_token_addition` |

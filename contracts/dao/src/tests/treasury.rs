@@ -1,6 +1,7 @@
 extern crate std;
 
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Events as _};
+use soroban_sdk::xdr::{ContractEventBody, ScVal};
 use soroban_sdk::{Address, Env, String, Vec};
 
 use super::common::*;
@@ -558,7 +559,6 @@ fn seeded_loans_count_towards_outstanding_principal() {
     assert_eq!(outstanding(), 0);
 }
 
-
 // Issue #279: an approved treasury proposal remains bound to its original asset.
 #[test]
 fn treasury_execution_uses_proposal_asset_after_whitelist_removal() {
@@ -592,4 +592,54 @@ fn treasury_execution_uses_proposal_asset_after_whitelist_removal() {
     assert_eq!(done.status, ProposalStatus::Executed);
     assert_eq!(asset.balance(&dest), 1_000);
     assert_eq!(s.token.balance(&dest), base_before);
+}
+
+// ==================== issues #477 and #478: expiry observability and idempotency ====================
+
+fn count_topic(env: &Env, name: &str) -> usize {
+    let events = env.events().all().events().to_vec();
+    event_topics(&events)
+        .iter()
+        .filter(|topic| topic.as_str() == name)
+        .count()
+}
+
+#[test]
+fn expire_treasury_proposal_is_idempotent_and_emits_tre_exp_once() {
+    let s = setup(2);
+    let proposer = s.members.get(0).unwrap();
+    let destination = Address::generate(&s.env);
+    let reason = String::from_str(&s.env, "expiring grant");
+    let pid = s
+        .client
+        .propose_treasury_withdrawal(&proposer, &300, &destination, &reason, &false);
+
+    advance(&s.env, VOTING_PERIOD + 1);
+    s.client.expire_treasury_proposal(&pid);
+
+    assert_eq!(count_topic(&s.env, "tre_exp"), 1);
+    let events = s.env.events().all().events().to_vec();
+    let event = events
+        .iter()
+        .rev()
+        .find(|event| {
+            let ContractEventBody::V0(body) = &event.body;
+            matches!(body.topics.first(), Some(ScVal::Symbol(sym)) if sym.0.to_utf8_string_lossy() == "tre_exp")
+        })
+        .expect("tre_exp event not found");
+    let ContractEventBody::V0(body) = &event.body;
+    assert_eq!(body.topics.len(), 1);
+    let ScVal::Vec(Some(data)) = &body.data else {
+        panic!("unexpected tre_exp data: {:?}", body.data);
+    };
+    assert_eq!(data.len(), 2);
+    assert_eq!(data[0], ScVal::U32(pid));
+    assert_eq!(data[1], ScVal::Address(proposer.into()));
+
+    s.client.expire_treasury_proposal(&pid);
+    assert_eq!(count_topic(&s.env, "tre_exp"), 0);
+    assert_eq!(
+        s.client.get_treasury_proposal(&pid).unwrap().status,
+        ProposalStatus::Expired,
+    );
 }

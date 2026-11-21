@@ -354,6 +354,23 @@ impl OurDao {
         privacy::reveal_vote(&env, voter, proposal_id, support, salt)
     }
 
+    /// Convenience pre-check: `true` only when the stored commitment matches
+    /// the supplied reveal inputs.
+    pub fn verify_commitment(
+        env: Env,
+        voter: Address,
+        proposal_id: u32,
+        support: bool,
+        salt: BytesN<32>,
+    ) -> bool {
+        privacy::verify_commitment(&env, voter, proposal_id, support, &salt)
+    }
+
+    /// Commit and reveal boundary timestamps for a private treasury proposal.
+    pub fn get_commit_reveal_window(env: Env, proposal_id: u32) -> Result<(u64, u64), Error> {
+        privacy::get_commit_reveal_window(&env, proposal_id)
+    }
+
     // ==================== native swap: content-hash docs ====================
 
     pub fn attach_document(
@@ -384,7 +401,6 @@ impl OurDao {
     pub fn get_member(env: Env, address: Address) -> Option<Member> {
         storage::get_member(&env, &address)
     }
-
 
     pub fn try_execute_policy_update(env: Env, caller: Address) -> Result<(), Error> {
         admin::try_execute_policy_update(&env, caller)
