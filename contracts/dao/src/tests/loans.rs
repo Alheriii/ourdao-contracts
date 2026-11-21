@@ -1507,3 +1507,26 @@ fn loan_lifecycle_in_second_asset() {
     assert_eq!(b.balance(&dao), 10_285);
     assert_eq!(s.client.get_treasury_balance(), base_treasury - base_yield);
 }
+
+
+// Issue #277: non-base loan sizing must use that asset's treasury, never base-token liquidity.
+#[test]
+fn second_asset_loan_ratio_uses_second_asset_balance() {
+    let s = setup(10); // base treasury = 10_000
+    let borrower = s.members.get(0).unwrap();
+    let asset = whitelist_second_asset(&s, 1_000);
+
+    // Policy cap is 50%: 501 exceeds half of asset-B's 1_000 even though
+    // the much larger base-token treasury could cover it.
+    let before_base = s.client.get_treasury_balance();
+    let before_asset = s.client.get_treasury_balance_in_asset(&asset.address);
+    let res = s
+        .client
+        .try_request_loan_in_asset(&borrower, &501, &asset.address, &None);
+    assert_eq!(res, Err(Ok(Error::ExceedsTreasuryRatio)));
+    assert_eq!(s.client.get_treasury_balance(), before_base);
+    assert_eq!(
+        s.client.get_treasury_balance_in_asset(&asset.address),
+        before_asset
+    );
+}
