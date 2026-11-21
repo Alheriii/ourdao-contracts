@@ -17,6 +17,7 @@ All notable changes to `ourdao-contracts` are documented here. The format follow
 - `staked` and `unstaked` events now include the resulting voting weight (#348).
 
 ### Added
+- Per-asset yield accumulators, remainders and member snapshots. Loan interest is credited and claimed in the loan's asset; `exit_dao` settles accrued yield in every tracked asset while preserving the existing base-token claim API (#271).
 - `scripts/deploy-testnet.sh` deploys a second test asset (`OURTESTB`) on testnet and proposes it for the treasury whitelist; `DEPLOYMENTS.md` tracks it (#342).
 - `get_member_overview(member)` view returning the member record, stake, pending yield, loan stats, registered name and delegate in one call (#340).
 - `get_delegate(delegator)` view returning the address a member delegated their vote to, or `None` (#341).
@@ -27,8 +28,11 @@ All notable changes to `ourdao-contracts` are documented here. The format follow
 - Equivalence tests proving `request_loan`, `repay_loan` and `propose_treasury_withdrawal` leave the same ledger state and emit the same events as their `*_in_asset(base)` counterparts (#285).
 - `loan_lifecycle_in_second_asset` test: request → edit → vote → disburse → partial repay → full repay → yield claim in a non-base asset, checking base and asset-B balances at every step (#286).
 - `default_in_second_asset` test. Default slashing for loans in a non-base asset is documented as invariant A6 in `docs/INVARIANTS.md` (#287).
+- `verify_commitment(voter, proposal_id, support, salt)` view and `get_commit_reveal_window(proposal_id)` view, backed by the same commitment and deadline helpers used by reveal/tally (#475, #476).
+- `tre_exp` event on successful treasury proposal expiry, documented in the README and `docs/events.schema.json` (#477).
 
 ### Fixed
+- `remove_token` now rejects removal while the treasury still holds any balance of that asset (#272).
 - Audit all eight DAO token-transfer call sites and align state effects before external token interactions (#317).
 - Enforce and regression-test admin-only `unpause`: the dedicated pauser may pause but cannot resume the DAO (#319).
 - Fixed `vote_batch` to authenticate the voter once for the batch instead of re-authorizing per proposal vote, preventing auth collisions (#308).
@@ -38,6 +42,7 @@ All notable changes to `ourdao-contracts` are documented here. The format follow
 - Apply treasury-favouring rounding for debt and interest calculations; document every division (#325).
 - Added regression coverage that `reveal_vote` removes the stored commitment (#356).
 - Validate consensus/treasury thresholds and quorum_bps are within 1..=10000: reject zero quorum_bps in proposed policy updates and verify set_consensus_threshold bounds (#320).
+- `expire_treasury_proposal` is now idempotent: repeated keeper calls on an already-`Expired` proposal succeed without a duplicate event (#478).
 
 
 ### Added

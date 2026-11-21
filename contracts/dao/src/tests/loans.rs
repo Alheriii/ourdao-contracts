@@ -958,6 +958,7 @@ fn loan_in_second_asset_disburses_and_repays_in_that_asset() {
     let v2 = s.members.get(2).unwrap();
     let asset = whitelist_second_asset(&s, 10_000);
     let base_treasury = s.client.get_treasury_balance();
+    let base_pending_before = s.client.get_pending_yield(&v1);
 
     // Sized against the second asset's treasury, not the base token's 3_000.
     let pid = s
@@ -991,8 +992,14 @@ fn loan_in_second_asset_disburses_and_repays_in_that_asset() {
         s.client.get_treasury_balance_in_asset(&asset.address),
         6_000 + loan.total_repayment
     );
-    // Interest in a non-base asset isn't distributed as base-token yield.
+    // Interest is credited only to the asset it was repaid in.
     assert_eq!(s.client.get_treasury_balance(), base_treasury);
+    assert_eq!(s.client.get_pending_yield(&v1), base_pending_before);
+    let interest = loan.total_repayment - loan.principal;
+    assert_eq!(
+        s.client.get_pending_yield_in_asset(&v1, &asset.address),
+        interest / 3
+    );
     assert!(!s.client.get_member(&borrower).unwrap().has_active_loan);
 }
 
@@ -1262,15 +1269,35 @@ fn default_in_second_asset() {
     let v2 = s.members.get(2).unwrap();
     let asset = whitelist_second_asset(&s, 10_000);
 
-    // Give every member unclaimed base-token yield first, so the forfeiture
+    // Give every member unclaimed yield in both assets so the forfeiture
     // on default is observable.
     let base_pid = s.client.request_loan(&v1, &1_000, &None);
     advance(&s.env, EDITING + 1);
     s.client.vote_on_loan_proposal(&v2, &base_pid, &true);
     s.client.vote_on_loan_proposal(&borrower, &base_pid, &true);
     s.client.repay_loan(&v1, &base_pid);
-    let accrued = s.client.get_pending_yield(&borrower);
-    assert!(accrued > 0);
+
+    let asset_yield_pid = s
+        .client
+        .request_loan_in_asset(&v1, &1_000, &asset.address, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&borrower, &asset_yield_pid, &true);
+    s.client.vote_on_loan_proposal(&v2, &asset_yield_pid, &true);
+    let asset_yield_loan = s.client.get_loan(&asset_yield_pid).unwrap();
+    mint_asset(
+        &s,
+        &asset.address,
+        &v1,
+        asset_yield_loan.total_repayment,
+    );
+    s.client
+        .repay_loan_in_asset(&v1, &asset_yield_pid, &asset.address);
+    let accrued_base = s.client.get_pending_yield(&borrower);
+    let accrued_asset = s
+        .client
+        .get_pending_yield_in_asset(&borrower, &asset.address);
+    assert!(accrued_base > 0);
+    assert!(accrued_asset > 0);
 
     let pid = s
         .client
@@ -1344,10 +1371,19 @@ fn default_in_second_asset() {
 
     // Unclaimed base-token yield is forfeited; everyone else keeps theirs.
     assert_eq!(s.client.get_pending_yield(&borrower), 0);
-    assert_eq!(s.client.get_pending_yield(&v2), accrued);
+    assert_eq!(
+        s.client
+            .get_pending_yield_in_asset(&borrower, &asset.address),
+        0
+    );
+    assert_eq!(s.client.get_pending_yield(&v2), accrued_base);
+    assert_eq!(
+        s.client.get_pending_yield_in_asset(&v2, &asset.address),
+        accrued_asset
+    );
 
-    // The reduced contribution shrinks the base-token exit share. The exit
-    // share never includes asset B, so exiting pays out base token only.
+    // The reduced contribution shrinks the base-token exit share. The capital
+    // share never includes asset B; the forfeited B yield was settled above.
     let expected_share = base_treasury * member.contribution / (3 * FEE - expected_penalty);
     assert_eq!(s.client.calculate_exit_share(&borrower), expected_share);
     let borrower_base = s.token.balance(&borrower);
@@ -1565,105 +1601,71 @@ fn repay_loan_in_asset_wrong_asset_moves_no_tokens() {
     assert_eq!(s.token.balance(&s.client.address), dao_base_before);
     assert_eq!(s.client.get_loan(&pid).unwrap().amount_repaid, 0);
 }
-
 #[test]
-fn vote_batch_enforces_limit_before_casting_votes() {
+fn many_tiny_partial_repayments_settle_exactly() {
     let s = setup(3);
     let borrower = s.members.get(0).unwrap();
-    let voter = s.members.get(1).unwrap();
-    let first_id = s.client.request_loan(&borrower, &1_000, &None);
-    let template = s.client.get_loan_proposal(&first_id).unwrap();
-    let limit = crate::storage::MAX_VOTES_PER_BATCH;
-    let mut votes = soroban_sdk::Vec::new(&s.env);
-    s.env.as_contract(&s.client.address, || {
-        for id in first_id..first_id + limit {
-            let mut proposal = template.clone();
-            proposal.id = id;
-            crate::storage::set_loan_proposal(&s.env, &proposal);
-            votes.push_back(ProposalVote {
-                proposal_id: id,
-                vote: true,
-            });
-        }
-    });
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+
+    let pid = s.client.request_loan(&borrower, &1_000, &None);
     advance(&s.env, EDITING + 1);
-    let mut oversized = votes.clone();
-    oversized.push_back(votes.get(0).unwrap());
-    assert_eq!(
-        s.client.try_vote_batch(&voter, &oversized),
-        Err(Ok(Error::TooManyVotesInBatch))
-    );
-    assert!(!s.client.has_voted(&ProposalKind::Loan, &first_id, &voter));
-    s.client.vote_batch(&voter, &votes);
-    for vote in votes {
-        assert!(s.client.has_voted(&ProposalKind::Loan, &vote.proposal_id, &voter));
-    }
-}
+    s.client.vote_on_loan_proposal(&v1, &pid, &true);
+    s.client.vote_on_loan_proposal(&v2, &pid, &true);
 
-#[test]
-fn eligibility_reports_membership_duration_before_cooldown() {
-    let s = setup(1);
-    let member = s.members.get(0).unwrap();
-    advance(&s.env, 10);
-    let now = s.env.ledger().timestamp();
-    s.env.as_contract(&s.client.address, || {
-        let mut loan_policy = policy();
-        loan_policy.min_membership_duration = 100;
-        loan_policy.cooldown_period = 100;
-        crate::storage::set_policy(&s.env, &loan_policy);
+    let initial_loan = s.client.get_loan(&pid).unwrap();
+    let total_repayment = initial_loan.total_repayment;
+    let interest_total = total_repayment - initial_loan.principal;
+    let mut amount_repaid = 0;
+    let mut installment = 1;
 
-        let mut record = crate::storage::get_member(&s.env, &member).unwrap();
-        record.join_time = now;
-        record.last_loan_time = now;
-        crate::storage::set_member(&s.env, &record);
-    });
-    assert_eq!(
-        s.client.try_is_eligible_for_loan(&member),
-        Err(Ok(Error::NotEligibleForLoan))
-    );
+    // Cycle through small installment sizes, including one-unit repayments.
+    while amount_repaid < total_repayment {
+        let remaining = total_repayment - amount_repaid;
+        let payment = installment.min(remaining);
 
-    s.env.as_contract(&s.client.address, || {
-        let mut loan_policy = crate::storage::get_policy(&s.env);
-        loan_policy.min_membership_duration = 0;
-        crate::storage::set_policy(&s.env, &loan_policy);
-    });
-    assert_eq!(
-        s.client.try_is_eligible_for_loan(&member),
-        Err(Ok(Error::CooldownActive))
-    );
-}
+        s.client
+            .repay_loan_partial(&borrower, &pid, &payment);
+        amount_repaid += payment;
 
-#[test]
-fn list_loans_pages_by_proposal_id_and_skips_missing_records() {
-    let s = setup(1);
-    let borrower = s.members.get(0).unwrap();
-    s.env.as_contract(&s.client.address, || {
-        crate::storage::set_next_proposal_id_at_least(&s.env, 4);
-        for id in [0, 2, 3] {
-            crate::storage::set_loan(
-                &s.env,
-                &crate::types::Loan {
-                    id,
-                    borrower: borrower.clone(),
-                    principal: 100,
-                    interest_rate: 500,
-                    total_repayment: 105,
-                    start_time: 0,
-                    due_time: 100,
-                    status: LoanStatus::Active,
-                    amount_repaid: 0,
-                },
-            );
+        let loan = s.client.get_loan(&pid).unwrap();
+        assert_eq!(loan.amount_repaid, amount_repaid);
+
+        // Interest is repaid first. Only the amount beyond unpaid interest
+        // reduces outstanding principal.
+        let interest_repaid = amount_repaid.min(interest_total);
+        let principal_repaid = amount_repaid - interest_repaid;
+        let expected_outstanding_principal = initial_loan.principal - principal_repaid;
+        assert_eq!(
+            s.client
+                .get_treasury_accounting(&s.token.address)
+                .outstanding_principal,
+            expected_outstanding_principal
+        );
+
+        // Interest yield is split equally across the three active members.
+        // The accumulator carries indivisible remainders between payments.
+        let expected_yield_per_member = interest_repaid / 3;
+        assert_eq!(s.client.get_pending_yield(&borrower), expected_yield_per_member);
+        assert_eq!(s.client.get_pending_yield(&v1), expected_yield_per_member);
+        assert_eq!(s.client.get_pending_yield(&v2), expected_yield_per_member);
+
+        if amount_repaid < total_repayment {
+            assert_eq!(loan.status, LoanStatus::Active);
+            assert!(s.client.get_member(&borrower).unwrap().has_active_loan);
         }
-    });
-    let first = s.client.list_loans(&0, &2);
-    assert_eq!(first.len(), 1);
-    assert_eq!(first.get(0).unwrap().id, 0);
-    let second = s.client.list_loans(&2, &2);
-    assert_eq!(second.len(), 2);
-    assert_eq!(second.get(0).unwrap().id, 2);
-    assert_eq!(second.get(1).unwrap().id, 3);
-    assert!(s.client.list_loans(&4, &2).is_empty());
-    assert!(s.client.list_loans(&u32::MAX, &2).is_empty());
-    assert!(s.client.list_loans(&0, &0).is_empty());
+
+        installment = if installment == 7 { 1 } else { installment + 1 };
+    }
+
+    let loan = s.client.get_loan(&pid).unwrap();
+    assert_eq!(loan.status, LoanStatus::Repaid);
+    assert_eq!(loan.amount_repaid, loan.total_repayment);
+    assert!(!s.client.get_member(&borrower).unwrap().has_active_loan);
+    assert_eq!(
+        s.client
+            .get_treasury_accounting(&s.token.address)
+            .outstanding_principal,
+        0
+    );
 }

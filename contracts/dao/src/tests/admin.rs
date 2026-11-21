@@ -168,6 +168,13 @@ fn pause_blocks_all_mutating_entrypoints_except_repay() {
             ),
         },
         EntryPoint {
+            name: "claim_rewards_in_asset",
+            blocked: matches!(
+                s.client.try_claim_rewards_in_asset(&borrower, &s.token.address),
+                Err(Ok(Error::Paused))
+            ),
+        },
+        EntryPoint {
             name: "delegate_vote",
             blocked: matches!(
                 s.client.try_delegate_vote(&borrower, &voter),
@@ -1017,6 +1024,21 @@ fn token_whitelist_lifecycle() {
         s.client.try_remove_token(&s.admin, &extra),
         Err(Ok(Error::TokenNotWhitelisted))
     );
+}
+
+#[test]
+fn remove_token_requires_empty_treasury() {
+    let s = setup(1);
+    let funded = whitelist_second_asset(&s, 100);
+    assert_eq!(
+        s.client.try_remove_token(&s.admin, &funded.address),
+        Err(Ok(Error::TokenHasBalance))
+    );
+    assert!(s.client.is_token_whitelisted(&funded.address));
+
+    let empty = whitelist_second_asset(&s, 0);
+    s.client.remove_token(&s.admin, &empty.address);
+    assert!(!s.client.is_token_whitelisted(&empty.address));
 }
 
 // Admin list handling uses host-side lookups (#357); the list stays a set.

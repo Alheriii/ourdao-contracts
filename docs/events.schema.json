@@ -506,6 +506,20 @@
       "properties": {},
       "additionalProperties": false
     },
+    "tre_exp": {
+      "type": "object",
+      "properties": {
+        "proposal_id": {
+          "type": "integer"
+        },
+        "proposer": {
+          "type": "string",
+          "format": "address"
+        }
+      },
+      "required": ["proposal_id", "proposer"],
+      "additionalProperties": false
+    },
     "joined": {
       "type": "object",
       "properties": {
@@ -534,6 +548,24 @@
       "required": ["member", "share"],
       "additionalProperties": false
     },
+    "exit_a": {
+      "type": "object",
+      "properties": {
+        "member": {
+          "type": "string",
+          "format": "address"
+        },
+        "asset": {
+          "type": "string",
+          "format": "address"
+        },
+        "amount": {
+          "type": "integer"
+        }
+      },
+      "required": ["member", "asset", "amount"],
+      "additionalProperties": false
+    },
     "claimed": {
       "type": "object",
       "properties": {
@@ -549,6 +581,24 @@
         }
       },
       "required": ["member", "amount", "timestamp"],
+      "additionalProperties": false
+    },
+    "clm_ast": {
+      "type": "object",
+      "properties": {
+        "member": {
+          "type": "string",
+          "format": "address"
+        },
+        "asset": {
+          "type": "string",
+          "format": "address"
+        },
+        "amount": {
+          "type": "integer"
+        }
+      },
+      "required": ["member", "asset", "amount"],
       "additionalProperties": false
     },
     "delegate": {
