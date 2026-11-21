@@ -1507,3 +1507,61 @@ fn loan_lifecycle_in_second_asset() {
     assert_eq!(b.balance(&dao), 10_285);
     assert_eq!(s.client.get_treasury_balance(), base_treasury - base_yield);
 }
+
+
+// Issue #277: non-base loan sizing must use that asset's treasury, never base-token liquidity.
+#[test]
+fn second_asset_loan_ratio_uses_second_asset_balance() {
+    let s = setup(10); // base treasury = 10_000
+    let borrower = s.members.get(0).unwrap();
+    let asset = whitelist_second_asset(&s, 1_000);
+
+    // Policy cap is 50%: 501 exceeds half of asset-B's 1_000 even though
+    // the much larger base-token treasury could cover it.
+    let before_base = s.client.get_treasury_balance();
+    let before_asset = s.client.get_treasury_balance_in_asset(&asset.address);
+    let res = s
+        .client
+        .try_request_loan_in_asset(&borrower, &501, &asset.address, &None);
+    assert_eq!(res, Err(Ok(Error::ExceedsTreasuryRatio)));
+    assert_eq!(s.client.get_treasury_balance(), before_base);
+    assert_eq!(
+        s.client.get_treasury_balance_in_asset(&asset.address),
+        before_asset
+    );
+}
+
+
+// Issue #278: naming the wrong repayment asset must fail before any transfer.
+#[test]
+fn repay_loan_in_asset_wrong_asset_moves_no_tokens() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+    let asset = whitelist_second_asset(&s, 10_000);
+
+    let pid = s
+        .client
+        .request_loan_in_asset(&borrower, &1_000, &asset.address, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&v1, &pid, &true);
+    s.client.vote_on_loan_proposal(&v2, &pid, &true);
+
+    let loan = s.client.get_loan(&pid).unwrap();
+    mint_asset(&s, &asset.address, &borrower, loan.total_repayment);
+    let borrower_asset_before = asset.balance(&borrower);
+    let dao_asset_before = asset.balance(&s.client.address);
+    let borrower_base_before = s.token.balance(&borrower);
+    let dao_base_before = s.token.balance(&s.client.address);
+
+    let res = s
+        .client
+        .try_repay_loan_in_asset(&borrower, &pid, &s.token.address);
+    assert_eq!(res, Err(Ok(Error::AssetMismatch)));
+    assert_eq!(asset.balance(&borrower), borrower_asset_before);
+    assert_eq!(asset.balance(&s.client.address), dao_asset_before);
+    assert_eq!(s.token.balance(&borrower), borrower_base_before);
+    assert_eq!(s.token.balance(&s.client.address), dao_base_before);
+    assert_eq!(s.client.get_loan(&pid).unwrap().amount_repaid, 0);
+}
