@@ -148,7 +148,7 @@ All entrypoints are on the `OurDao` contract (`lib.rs`). Errors are the numeric 
 | `edit_loan_proposal(borrower, proposal_id, new_amount)` | Only during the editing window, only the borrower. |
 | `cancel_loan_proposal(borrower, proposal_id)` | Only during the editing window, only the borrower. |
 | `vote_on_loan_proposal(voter, proposal_id, support)` | Auto-approves and disburses at the consensus threshold. |
-| `vote_batch(voter, votes)` | Casts votes across multiple loan/treasury proposals in one call. |
+| `vote_batch(voter, votes)` | Casts votes across up to 10 loan proposals in one call. Larger batches return `TooManyVotesInBatch` (92). |
 | `disburse_approved_loan(loan_id)` | Disburses an approved loan's funds. |
 | `repay_loan(borrower, loan_id)` | Collects the full outstanding balance in one transaction. |
 | `repay_loan_in_asset(borrower, loan_id, asset)` | `repay_loan` that fails with `AssetMismatch` unless `asset` is the loan's own asset. Interest is credited as yield in the loan's own asset. |
