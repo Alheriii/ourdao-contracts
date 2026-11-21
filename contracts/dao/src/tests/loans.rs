@@ -1565,3 +1565,71 @@ fn repay_loan_in_asset_wrong_asset_moves_no_tokens() {
     assert_eq!(s.token.balance(&s.client.address), dao_base_before);
     assert_eq!(s.client.get_loan(&pid).unwrap().amount_repaid, 0);
 }
+#[test]
+fn many_tiny_partial_repayments_settle_exactly() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+
+    let pid = s.client.request_loan(&borrower, &1_000, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&v1, &pid, &true);
+    s.client.vote_on_loan_proposal(&v2, &pid, &true);
+
+    let initial_loan = s.client.get_loan(&pid).unwrap();
+    let total_repayment = initial_loan.total_repayment;
+    let interest_total = total_repayment - initial_loan.principal;
+    let mut amount_repaid = 0;
+    let mut installment = 1;
+
+    // Cycle through small installment sizes, including one-unit repayments.
+    while amount_repaid < total_repayment {
+        let remaining = total_repayment - amount_repaid;
+        let payment = installment.min(remaining);
+
+        s.client
+            .repay_loan_partial(&borrower, &pid, &payment);
+        amount_repaid += payment;
+
+        let loan = s.client.get_loan(&pid).unwrap();
+        assert_eq!(loan.amount_repaid, amount_repaid);
+
+        // Interest is repaid first. Only the amount beyond unpaid interest
+        // reduces outstanding principal.
+        let interest_repaid = amount_repaid.min(interest_total);
+        let principal_repaid = amount_repaid - interest_repaid;
+        let expected_outstanding_principal = initial_loan.principal - principal_repaid;
+        assert_eq!(
+            s.client
+                .get_treasury_accounting(&s.token.address)
+                .outstanding_principal,
+            expected_outstanding_principal
+        );
+
+        // Interest yield is split equally across the three active members.
+        // The accumulator carries indivisible remainders between payments.
+        let expected_yield_per_member = interest_repaid / 3;
+        assert_eq!(s.client.get_pending_yield(&borrower), expected_yield_per_member);
+        assert_eq!(s.client.get_pending_yield(&v1), expected_yield_per_member);
+        assert_eq!(s.client.get_pending_yield(&v2), expected_yield_per_member);
+
+        if amount_repaid < total_repayment {
+            assert_eq!(loan.status, LoanStatus::Active);
+            assert!(s.client.get_member(&borrower).unwrap().has_active_loan);
+        }
+
+        installment = if installment == 7 { 1 } else { installment + 1 };
+    }
+
+    let loan = s.client.get_loan(&pid).unwrap();
+    assert_eq!(loan.status, LoanStatus::Repaid);
+    assert_eq!(loan.amount_repaid, loan.total_repayment);
+    assert!(!s.client.get_member(&borrower).unwrap().has_active_loan);
+    assert_eq!(
+        s.client
+            .get_treasury_accounting(&s.token.address)
+            .outstanding_principal,
+        0
+    );
+}
