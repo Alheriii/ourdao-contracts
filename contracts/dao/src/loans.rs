@@ -291,6 +291,10 @@ pub fn vote_batch(
     util::require_not_paused(env)?;
     util::require_active_member(env, &voter)?;
 
+    if votes.len() > storage::MAX_VOTES_PER_BATCH {
+        return Err(Error::TooManyVotesInBatch);
+    }
+
     for v in votes.iter() {
         vote_on_loan_proposal_internal(env, &voter, v.proposal_id, v.vote)?;
     }

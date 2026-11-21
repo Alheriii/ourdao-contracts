@@ -147,7 +147,7 @@ All entrypoints are on the `OurDao` contract (`lib.rs`). Errors are the numeric 
 | `edit_loan_proposal(borrower, proposal_id, new_amount)` | Only during the editing window, only the borrower. |
 | `cancel_loan_proposal(borrower, proposal_id)` | Only during the editing window, only the borrower. |
 | `vote_on_loan_proposal(voter, proposal_id, support)` | Auto-approves and disburses at the consensus threshold. |
-| `vote_batch(voter, votes)` | Casts votes across multiple loan/treasury proposals in one call. |
+| `vote_batch(voter, votes)` | Casts votes across up to 10 loan proposals in one call. Larger batches return `TooManyVotesInBatch` (92). |
 | `disburse_approved_loan(loan_id)` | Disburses an approved loan's funds. |
 | `repay_loan(borrower, loan_id)` | Collects the full outstanding balance in one transaction. |
 | `repay_loan_in_asset(borrower, loan_id, asset)` | `repay_loan` that fails with `AssetMismatch` unless `asset` is the loan's own asset. Interest on a non-base-asset loan stays in the treasury instead of being distributed as yield. |
@@ -212,7 +212,19 @@ The *k*-th bonus vote starts at `k² × 100` staked tokens, so the thresholds ar
 | `attach_document(caller, kind, proposal_id, content_hash)` | Anchors an off-chain content hash (e.g. IPFS CID) to a real loan/treasury proposal. |
 | `get_document(kind, proposal_id) -> Option<Bytes>` | View. |
 
-**Views** — `get_member`, `get_member_overview`, `get_loan`, `get_loan_proposal` (auto-refreshes expired phase), `get_loan_proposal_count`, `get_treasury_proposal`, `get_treasury_proposal_count`, `get_loan_policy`, `get_pending_policy_update`, `get_admins`, `is_admin`, `is_member`, `is_eligible_for_loan`, `get_treasury_balance`, `get_treasury_balance_in_asset(asset)`, `is_token_whitelisted(token)`, `get_whitelisted_tokens`, `get_total_members`, `get_active_members`, `get_consensus_threshold`, `get_token`, `get_version`, `get_dao_summary` (all headline state in one call), `is_paused`, `get_stake`, `get_stake_weight_unit`, `get_max_stake_bonus`, `get_pending_yield`, `get_delegate`, `list_members`, `list_treasury_proposals`, `calculate_loan_terms`, `calculate_exit_share`, `has_voted(kind, proposal_id, voter)`.
+**Views** — `get_member`, `get_member_overview`, `get_loan`, `get_loan_proposal` (auto-refreshes expired phase), `get_loan_proposal_count`, `get_treasury_proposal`, `get_treasury_proposal_count`, `get_loan_policy`, `get_pending_policy_update`, `get_admins`, `is_admin`, `is_member`, `is_eligible_for_loan`, `get_treasury_balance`, `get_treasury_balance_in_asset(asset)`, `is_token_whitelisted(token)`, `get_whitelisted_tokens`, `get_pending_token_additions`, `get_total_members`, `get_active_members`, `get_consensus_threshold`, `get_token`, `get_version`, `get_dao_summary` (all headline state in one call), `is_paused`, `get_stake`, `get_stake_weight_unit`, `get_max_stake_bonus`, `get_pending_yield`, `get_delegate`, `list_members`, `list_treasury_proposals`, `list_loans(start, limit)`, `calculate_loan_terms`, `calculate_exit_share`, `has_voted(kind, proposal_id, voter)`.
+
+`is_eligible_for_loan` returns the first failing check. Calling it again after
+resolving that failure may reveal a different eligibility error.
+
+`list_loans` scans a window of proposal IDs and skips IDs without a loan. Advance
+`start` by `limit` even when the page has fewer rows. Clients can filter returned
+loans by status and borrower.
+
+`get_pending_token_additions` returns asset addresses and earliest execution
+timestamps in proposal order. On upgraded contracts, pending additions created
+before indexing can still be looked up by token through
+`get_pending_token_addition(token)`.
 
 > **Note on Treasury Balance Views (#500, #501)**: `get_treasury_balance` and `get_treasury_balance_in_asset` report the DAO's lendable treasury balance, explicitly excluding staked member deposits for the base token to maintain invariant L1. Raw, stake-inclusive token balance is not exposed as a separate entrypoint because external audit/reconciliation tools can query the token contract's standard `balance(&dao_address)` directly. Furthermore, `get_treasury_balance_in_asset(asset)` (#501) is not restricted to whitelisted assets; it reads the contract's actual balance for any queried asset address.
 

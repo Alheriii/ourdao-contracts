@@ -1229,3 +1229,35 @@ fn removed_token_balance_reporting() {
     assert_eq!(s.client.get_treasury_balance_in_asset(&other_token), 0);
 }
 }
+
+#[test]
+fn pending_token_additions_remain_indexed_until_execution() {
+    let s = setup(1);
+    let first = s
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&s.env))
+        .address();
+    let second = s
+        .env
+        .register_stellar_asset_contract_v2(Address::generate(&s.env))
+        .address();
+    assert!(s.client.get_pending_token_additions().is_empty());
+
+    s.client.propose_token_addition(&s.admin, &first);
+    advance(&s.env, 1);
+    s.client.propose_token_addition(&s.admin, &second);
+    s.client.propose_token_addition(&s.admin, &second);
+    let first_eta = s.client.get_pending_token_addition(&first).unwrap();
+    let second_eta = s.client.get_pending_token_addition(&second).unwrap();
+    assert_eq!(
+        s.client.get_pending_token_additions(),
+        Vec::from_array(&s.env, [(first.clone(), first_eta), (second.clone(), second_eta)])
+    );
+
+    advance(&s.env, TIMELOCK_DURATION);
+    s.client.execute_token_addition(&s.admin, &first);
+    assert_eq!(
+        s.client.get_pending_token_additions(),
+        Vec::from_array(&s.env, [(second, second_eta)])
+    );
+}

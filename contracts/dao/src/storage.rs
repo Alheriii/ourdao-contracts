@@ -87,6 +87,8 @@ pub(crate) enum DataKey {
     /// Principal still owed on `Active` loans denominated in this asset.
     /// Absent means zero.
     OutstandingPrincipal(Address),
+    /// Addresses with indexed pending token additions, in proposal order.
+    PendingTokenAdditions,
 }
 
 pub fn extend_instance(env: &Env) {
@@ -291,6 +293,8 @@ pub fn set_member(env: &Env, member: &Member) {
 
 /// Bound how many unclosed proposals one member may have at a time.
 pub const MAX_OPEN_PROPOSALS_PER_MEMBER: u32 = 3;
+/// Maximum number of loan proposals accepted by one batch vote.
+pub const MAX_VOTES_PER_BATCH: u32 = 10;
 
 /// Refresh the member's quota from authoritative proposal states and cache it (#502).
 ///
@@ -589,16 +593,58 @@ pub fn get_pending_token_addition(env: &Env, token: &Address) -> Option<u64> {
         .get(&DataKey::PendingTokenAddition(token.clone()))
 }
 
+fn pending_token_addresses(env: &Env) -> Vec<Address> {
+    let key = DataKey::PendingTokenAdditions;
+    match env.storage().persistent().get(&key) {
+        Some(tokens) => {
+            extend_persistent(env, &key);
+            tokens
+        }
+        None => Vec::new(env),
+    }
+}
+
+pub fn get_pending_token_additions(env: &Env) -> Vec<(Address, u64)> {
+    let mut pending = Vec::new(env);
+    for token in pending_token_addresses(env) {
+        if let Some(execution_time) = get_pending_token_addition(env, &token) {
+            pending.push_back((token, execution_time));
+        }
+    }
+    pending
+}
+
 pub fn set_pending_token_addition(env: &Env, token: &Address, execution_time: u64) {
     let key = DataKey::PendingTokenAddition(token.clone());
     env.storage().persistent().set(&key, &execution_time);
     extend_persistent(env, &key);
+
+    let mut tokens = pending_token_addresses(env);
+    if !tokens.contains(token) {
+        tokens.push_back(token.clone());
+    }
+    env.storage()
+        .persistent()
+        .set(&DataKey::PendingTokenAdditions, &tokens);
+    extend_persistent(env, &DataKey::PendingTokenAdditions);
 }
 
 pub fn remove_pending_token_addition(env: &Env, token: &Address) {
     env.storage()
         .persistent()
         .remove(&DataKey::PendingTokenAddition(token.clone()));
+
+    let mut tokens = pending_token_addresses(env);
+    if let Some(index) = tokens.first_index_of(token) {
+        tokens.remove(index);
+        let key = DataKey::PendingTokenAdditions;
+        if tokens.is_empty() {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(&key, &tokens);
+            extend_persistent(env, &key);
+        }
+    }
 }
 
 /// Asset of loan proposal / loan `id`; the base token unless recorded.

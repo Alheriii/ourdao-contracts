@@ -456,6 +456,8 @@ impl OurDao {
         )
     }
 
+    /// Reports the first failing eligibility check. Checking again after
+    /// resolving that error can reveal another eligibility failure.
     pub fn is_eligible_for_loan(env: Env, member: Address) -> Result<(), Error> {
         loans::is_eligible_for_loan(&env, &member)
     }
@@ -566,6 +568,11 @@ impl OurDao {
         storage::get_pending_token_addition(&env, &token)
     }
 
+    /// Lists indexed pending asset additions with their earliest execution times.
+    pub fn get_pending_token_additions(env: Env) -> Vec<(Address, u64)> {
+        storage::get_pending_token_additions(&env)
+    }
+
     pub fn is_paused(env: Env) -> bool {
         storage::is_paused(&env)
     }
@@ -672,6 +679,19 @@ impl OurDao {
             }
         }
         out
+    }
+
+    /// Lists up to `limit` loans within the proposal-ID window starting at
+    /// `start`. Missing loans are skipped and do not extend the window.
+    pub fn list_loans(env: Env, start: u32, limit: u32) -> Vec<Loan> {
+        let count = storage::get_proposal_count(&env, storage::DataKey::NextProposalId);
+        let mut loans = Vec::new(&env);
+        for id in start.min(count)..start.saturating_add(limit).min(count) {
+            if let Some(loan) = storage::get_loan(&env, id) {
+                loans.push_back(loan);
+            }
+        }
+        loans
     }
 
     // ==================== migration seed entrypoints (#332 / #333) ====================

@@ -1565,3 +1565,105 @@ fn repay_loan_in_asset_wrong_asset_moves_no_tokens() {
     assert_eq!(s.token.balance(&s.client.address), dao_base_before);
     assert_eq!(s.client.get_loan(&pid).unwrap().amount_repaid, 0);
 }
+
+#[test]
+fn vote_batch_enforces_limit_before_casting_votes() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let voter = s.members.get(1).unwrap();
+    let first_id = s.client.request_loan(&borrower, &1_000, &None);
+    let template = s.client.get_loan_proposal(&first_id).unwrap();
+    let limit = crate::storage::MAX_VOTES_PER_BATCH;
+    let mut votes = soroban_sdk::Vec::new(&s.env);
+    s.env.as_contract(&s.client.address, || {
+        for id in first_id..first_id + limit {
+            let mut proposal = template.clone();
+            proposal.id = id;
+            crate::storage::set_loan_proposal(&s.env, &proposal);
+            votes.push_back(ProposalVote {
+                proposal_id: id,
+                vote: true,
+            });
+        }
+    });
+    advance(&s.env, EDITING + 1);
+    let mut oversized = votes.clone();
+    oversized.push_back(votes.get(0).unwrap());
+    assert_eq!(
+        s.client.try_vote_batch(&voter, &oversized),
+        Err(Ok(Error::TooManyVotesInBatch))
+    );
+    assert!(!s.client.has_voted(&ProposalKind::Loan, &first_id, &voter));
+    s.client.vote_batch(&voter, &votes);
+    for vote in votes {
+        assert!(s.client.has_voted(&ProposalKind::Loan, &vote.proposal_id, &voter));
+    }
+}
+
+#[test]
+fn eligibility_reports_membership_duration_before_cooldown() {
+    let s = setup(1);
+    let member = s.members.get(0).unwrap();
+    advance(&s.env, 10);
+    let now = s.env.ledger().timestamp();
+    s.env.as_contract(&s.client.address, || {
+        let mut loan_policy = policy();
+        loan_policy.min_membership_duration = 100;
+        loan_policy.cooldown_period = 100;
+        crate::storage::set_policy(&s.env, &loan_policy);
+
+        let mut record = crate::storage::get_member(&s.env, &member).unwrap();
+        record.join_time = now;
+        record.last_loan_time = now;
+        crate::storage::set_member(&s.env, &record);
+    });
+    assert_eq!(
+        s.client.try_is_eligible_for_loan(&member),
+        Err(Ok(Error::NotEligibleForLoan))
+    );
+
+    s.env.as_contract(&s.client.address, || {
+        let mut loan_policy = crate::storage::get_policy(&s.env);
+        loan_policy.min_membership_duration = 0;
+        crate::storage::set_policy(&s.env, &loan_policy);
+    });
+    assert_eq!(
+        s.client.try_is_eligible_for_loan(&member),
+        Err(Ok(Error::CooldownActive))
+    );
+}
+
+#[test]
+fn list_loans_pages_by_proposal_id_and_skips_missing_records() {
+    let s = setup(1);
+    let borrower = s.members.get(0).unwrap();
+    s.env.as_contract(&s.client.address, || {
+        crate::storage::set_next_proposal_id_at_least(&s.env, 4);
+        for id in [0, 2, 3] {
+            crate::storage::set_loan(
+                &s.env,
+                &crate::types::Loan {
+                    id,
+                    borrower: borrower.clone(),
+                    principal: 100,
+                    interest_rate: 500,
+                    total_repayment: 105,
+                    start_time: 0,
+                    due_time: 100,
+                    status: LoanStatus::Active,
+                    amount_repaid: 0,
+                },
+            );
+        }
+    });
+    let first = s.client.list_loans(&0, &2);
+    assert_eq!(first.len(), 1);
+    assert_eq!(first.get(0).unwrap().id, 0);
+    let second = s.client.list_loans(&2, &2);
+    assert_eq!(second.len(), 2);
+    assert_eq!(second.get(0).unwrap().id, 2);
+    assert_eq!(second.get(1).unwrap().id, 3);
+    assert!(s.client.list_loans(&4, &2).is_empty());
+    assert!(s.client.list_loans(&u32::MAX, &2).is_empty());
+    assert!(s.client.list_loans(&0, &0).is_empty());
+}
