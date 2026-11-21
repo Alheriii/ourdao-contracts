@@ -1,9 +1,11 @@
+extern crate std;
+
 use soroban_sdk::testutils::Address as _;
-use soroban_sdk::{Address, String};
+use soroban_sdk::{Address, Env, String, Vec};
 
 use super::common::*;
-use crate::types::ProposalStatus;
-use crate::Error;
+use crate::types::{LoanStatus, ProposalStatus, TreasuryAccounting};
+use crate::{Error, Loan, OurDao, OurDaoClient};
 
 #[test]
 fn treasury_withdrawal_open_vote() {
@@ -324,14 +326,234 @@ fn propose_treasury_withdrawal_rejects_self_destination() {
     assert_eq!(res_asset, Err(Ok(Error::InvalidProposal)));
 }
 
-// Issue #501: get_treasury_balance_in_asset works for non-whitelisted token
+// ==================== issue #285: single-token withdrawal entrypoint ====================
+
+/// Propose → vote → vote (executes) through one entrypoint family, observing
+/// after every call.
+fn run_withdrawal_path(path: EntryPath) -> std::vec::Vec<Observation> {
+    let s = setup(3);
+    let proposer = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+    let dest = Address::generate(&s.env);
+    let reason = String::from_str(&s.env, "grant");
+    let mut steps = std::vec::Vec::new();
+
+    let pid = match path {
+        EntryPath::Legacy => s
+            .client
+            .propose_treasury_withdrawal(&proposer, &600, &dest, &reason, &false),
+        EntryPath::InBaseAsset => s.client.propose_withdrawal_in_asset(
+            &proposer,
+            &600,
+            &s.token.address,
+            &dest,
+            &reason,
+            &false,
+        ),
+    };
+    steps.push(observe(&s.env));
+    s.client.vote_on_treasury_proposal(&v1, &pid, &true);
+    steps.push(observe(&s.env));
+    s.client.vote_on_treasury_proposal(&v2, &pid, &true);
+    steps.push(observe(&s.env));
+    assert_eq!(s.token.balance(&dest), 600);
+    steps
+}
+
 #[test]
-fn get_treasury_balance_in_asset_works_for_non_whitelisted_token() {
+fn single_token_withdrawal_entrypoint_matches_base_asset_counterpart() {
+    let legacy = run_withdrawal_path(EntryPath::Legacy);
+    let in_base = run_withdrawal_path(EntryPath::InBaseAsset);
+
+    // Every step did real work, so the comparison below isn't vacuous.
+    let topics: std::vec::Vec<_> = legacy.iter().map(|o| event_topics(&o.0)).collect();
+    for (step, expected) in ["tre_prop", "tre_vote", "tre_exec"].iter().enumerate() {
+        assert!(
+            topics[step].iter().any(|t| t == expected),
+            "step {step} emitted {:?}, expected {expected}",
+            topics[step]
+        );
+    }
+    // Naming the base token records no proposal asset, like the legacy path.
+    assert!(!topics[0].iter().any(|t| t == "tre_asset"));
+
+    assert_runs_identical(&legacy, &in_base);
+}
+
+// ==================== issue #288: treasury reconciliation view ====================
+
+#[test]
+fn treasury_accounting_matches_manual_calculation() {
+    let s = setup(3);
+    let staker = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+    let base = s.token.address.clone();
+    let accounting = |asset: &Address| s.client.get_treasury_accounting(asset);
+
+    // Base token: the balance is what the token reports, and member stake is
+    // reported apart from it. 50 is below one weight unit, so the votes
+    // below are unaffected.
+    s.client.stake(&staker, &50);
+    let held = s.token.balance(&s.client.address);
+    let acct = accounting(&base);
+    assert_eq!(
+        acct,
+        TreasuryAccounting {
+            token_balance: held,
+            staked: 50,
+            outstanding_principal: 0,
+        }
+    );
+    assert_eq!(
+        acct.token_balance - acct.staked,
+        s.client.get_treasury_balance()
+    );
+
+    // A base-token loan moves its principal out of the balance into
+    // outstanding, and full repayment brings it back with interest.
+    let pid = s.client.request_loan(&v2, &1_000, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&staker, &pid, &true);
+    s.client.vote_on_loan_proposal(&v1, &pid, &true);
+    let loan = s.client.get_loan(&pid).unwrap();
+    assert_eq!(accounting(&base).token_balance, held - 1_000);
+    assert_eq!(accounting(&base).outstanding_principal, 1_000);
+    s.client.repay_loan(&v2, &pid);
+    assert_eq!(
+        accounting(&base),
+        TreasuryAccounting {
+            token_balance: held - loan.principal + loan.total_repayment,
+            staked: 50,
+            outstanding_principal: 0,
+        }
+    );
+    let base_after = accounting(&base);
+
+    // Asset B: nothing staked, nothing lent yet.
+    let b = whitelist_second_asset(&s, 10_000);
+    assert_eq!(
+        accounting(&b.address),
+        TreasuryAccounting {
+            token_balance: 10_000,
+            staked: 0,
+            outstanding_principal: 0,
+        }
+    );
+
+    let pid = s
+        .client
+        .request_loan_in_asset(&v1, &4_000, &b.address, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&staker, &pid, &true);
+    s.client.vote_on_loan_proposal(&v2, &pid, &true);
+    let loan = s.client.get_loan(&pid).unwrap();
+    let interest = loan.total_repayment - loan.principal;
+    assert_eq!(
+        accounting(&b.address),
+        TreasuryAccounting {
+            token_balance: 6_000,
+            staked: 0,
+            outstanding_principal: 4_000,
+        }
+    );
+
+    // Partial repayment: only the part beyond the interest repays principal.
+    mint_asset(&s, &b.address, &v1, interest);
+    s.client.repay_loan_partial(&v1, &pid, &(interest + 1_500));
+    assert_eq!(
+        accounting(&b.address),
+        TreasuryAccounting {
+            token_balance: 6_000 + interest + 1_500,
+            staked: 0,
+            outstanding_principal: 2_500,
+        }
+    );
+
+    // A direct transfer raises the balance without any accounted flow: the
+    // drift this view exists to expose.
+    mint_asset(&s, &b.address, &s.client.address, 777);
+    assert_eq!(
+        accounting(&b.address).token_balance,
+        6_000 + interest + 1_500 + 777
+    );
+    assert_eq!(accounting(&b.address).outstanding_principal, 2_500);
+
+    // Overdue: the penalty (20% of the 2_500 still owed = 500) is booked as
+    // principal, then this all-principal payment of 1_000 reduces it.
+    advance(&s.env, LOAN_DURATION + 1);
+    s.client.repay_loan_partial(&v1, &pid, &1_000);
+    assert_eq!(
+        accounting(&b.address).outstanding_principal,
+        2_500 + 500 - 1_000
+    );
+
+    // Default writes off whatever principal is still owed.
+    s.client.mark_loan_defaulted(&pid);
+    assert_eq!(
+        accounting(&b.address),
+        TreasuryAccounting {
+            token_balance: 6_000 + interest + 1_500 + 777 + 1_000,
+            staked: 0,
+            outstanding_principal: 0,
+        }
+    );
+    // None of this touched the base token.
+    assert_eq!(accounting(&base), base_after);
+}
+
+#[test]
+fn treasury_accounting_requires_initialization() {
+    let env = Env::default();
+    let client = OurDaoClient::new(&env, &env.register(OurDao, ()));
+    let asset = Address::generate(&env);
+    assert_eq!(
+        client.try_get_treasury_accounting(&asset),
+        Err(Ok(Error::NotInitialized))
+    );
+}
+
+#[test]
+fn seeded_loans_count_towards_outstanding_principal() {
     let s = setup(1);
-    let other_sac = s.env.register_stellar_asset_contract_v2(Address::generate(&s.env));
-    // Asset was never whitelisted
-    assert!(!s.client.is_token_whitelisted(&other_sac.address()));
-    // View still returns the actual token balance held by the contract (0)
-    let bal = s.client.get_treasury_balance_in_asset(&other_sac.address());
-    assert_eq!(bal, 0);
+    let borrower = s.members.get(0).unwrap();
+    let base = s.token.address.clone();
+    let now = s.env.ledger().timestamp();
+
+    // 100 already repaid: the 50 of interest, then 50 of principal.
+    let active = Loan {
+        id: 7,
+        borrower: borrower.clone(),
+        principal: 1_000,
+        interest_rate: 500,
+        total_repayment: 1_050,
+        start_time: now,
+        due_time: now + LOAN_DURATION,
+        status: LoanStatus::Active,
+        amount_repaid: 100,
+    };
+    let mut batch = Vec::new(&s.env);
+    batch.push_back(active.clone());
+    s.client.seed_loans(&s.admin, &batch);
+    let outstanding = || {
+        s.client
+            .get_treasury_accounting(&base)
+            .outstanding_principal
+    };
+    assert_eq!(outstanding(), 950);
+
+    // Re-seeding an id replaces what it contributed instead of adding to it,
+    // and a loan that is no longer active contributes nothing.
+    let mut repaid = active.clone();
+    repaid.id = 8;
+    repaid.status = LoanStatus::Repaid;
+    repaid.amount_repaid = repaid.total_repayment;
+    batch.push_back(repaid);
+    s.client.seed_loans(&s.admin, &batch);
+    assert_eq!(outstanding(), 950);
+
+    // Repaying the seeded loan settles it exactly.
+    s.client.repay_loan(&borrower, &7);
+    assert_eq!(outstanding(), 0);
 }

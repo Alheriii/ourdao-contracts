@@ -432,6 +432,7 @@ fn approve_and_disburse(env: &Env, proposal: &LoanProposal) -> Result<(), Error>
         amount_repaid: 0,
     };
     storage::set_loan(env, &loan);
+    storage::adjust_outstanding_principal(env, &asset, principal_outstanding(&loan));
 
     let mut borrower = storage::get_member(env, &proposal.borrower).ok_or(Error::NotMember)?;
     borrower.has_active_loan = true;
@@ -553,6 +554,7 @@ fn repay_loan_internal(
     if loan.status != LoanStatus::Active {
         return Err(Error::LoanNotActive);
     }
+    let principal_before = principal_outstanding(&loan);
 
     let mut outstanding = loan.total_repayment - loan.amount_repaid;
 
@@ -601,6 +603,12 @@ fn repay_loan_internal(
         }
     }
     storage::set_loan(env, &loan);
+    // Net of any overdue penalty booked as principal above.
+    storage::adjust_outstanding_principal(
+        env,
+        &asset,
+        principal_outstanding(&loan) - principal_before,
+    );
 
     // Yield is accounted and claimed in the base token, so interest paid in
     // any other asset stays in the treasury rather than being distributed.
@@ -675,8 +683,15 @@ pub fn mark_loan_defaulted(env: &Env, loan_id: u32) -> Result<(), Error> {
         return Err(Error::LoanNotOverdue);
     }
 
+    // Whatever principal is still owed is written off, not repaid.
+    let written_off = principal_outstanding(&loan);
     loan.status = LoanStatus::Defaulted;
     storage::set_loan(env, &loan);
+    storage::adjust_outstanding_principal(
+        env,
+        &storage::get_loan_asset(env, loan_id),
+        -written_off,
+    );
 
     let mut penalty: i128 = 0;
     if let Some(mut member) = storage::get_member(env, &loan.borrower) {
@@ -719,6 +734,20 @@ pub fn mark_loan_defaulted(env: &Env, loan_id: u32) -> Result<(), Error> {
         (loan_id, loan.borrower.clone(), penalty),
     );
     Ok(())
+}
+
+/// Principal `loan` still owes the treasury, as tracked per asset for
+/// `get_treasury_accounting` (#288): zero unless the loan is `Active`.
+/// Payments cover interest first (see [`repay_loan_partial`]), so only what
+/// has been paid beyond the loan's interest counts as principal repaid. An
+/// overdue penalty is booked as principal, so it is included until paid.
+pub(crate) fn principal_outstanding(loan: &Loan) -> i128 {
+    if loan.status != LoanStatus::Active {
+        return 0;
+    }
+    let interest_total = loan.total_repayment - loan.principal;
+    let principal_repaid = loan.amount_repaid - loan.amount_repaid.min(interest_total);
+    loan.principal - principal_repaid
 }
 
 /// Splits repaid interest equally across active members as claimable yield.

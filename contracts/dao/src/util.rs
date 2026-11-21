@@ -42,11 +42,16 @@ pub fn treasury_balance_for(env: &Env, asset: &Address) -> i128 {
 /// Spendable treasury in `asset`. Staking only ever happens in the base token,
 /// so staked funds are excluded for the base token alone.
 pub fn treasury_balance_in_asset(env: &Env, asset: &Address) -> i128 {
-    let bal = treasury_balance_for(env, asset);
+    treasury_balance_for(env, asset) - staked_in_asset(env, asset)
+}
+
+/// Member stake held in `asset`: the total staked for the base token, zero
+/// for any other asset.
+pub fn staked_in_asset(env: &Env, asset: &Address) -> i128 {
     if *asset == storage::get_token(env) {
-        bal - storage::get_total_staked(env)
+        storage::get_total_staked(env)
     } else {
-        bal
+        0
     }
 }
 

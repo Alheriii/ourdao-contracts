@@ -58,6 +58,50 @@ inconsistency; tracking issue: open as follow-up (#134).
 
 ---
 
+### A5 — Outstanding principal per asset matches the active loans in it
+**Statement:** For every asset, `get_treasury_accounting(asset).outstanding_principal`
+equals the principal still owed on `Active` loans denominated in that asset.
+Repayments cover interest first, so a loan owes
+`principal - (amount_repaid - min(amount_repaid, total_repayment - principal))`.
+An overdue penalty is booked as principal, so it counts until it is paid. A
+default writes off whatever is still owed. Loans added through `seed_loans`
+count too, and re-seeding an id replaces its previous contribution instead of
+adding to it.
+
+The same view reports the asset's actual `token_balance` and the `staked`
+portion of it (base token only). `token_balance - staked` is the spendable
+treasury. Any balance the indexed event history doesn't explain, such as a
+direct transfer to the contract, is drift.
+
+**Tested:** ✅ `tests::treasury::treasury_accounting_matches_manual_calculation`,
+`tests::treasury::seeded_loans_count_towards_outstanding_principal`,
+`tests::loans::loan_lifecycle_in_second_asset`
+(`contracts/dao/src/tests/`)
+
+---
+
+### A6 — A default slashes the base-token contribution, whatever the loan's asset
+**Statement:** `mark_loan_defaulted` behaves the same for a loan in a non-base
+asset as for a base-token loan:
+
+- The claim that is slashed is the borrower's `contribution`, which is their
+  share of the **base-token** treasury at exit (`calculate_exit_share`). It is
+  cut by `default_penalty_bps`, rounded up and capped at the contribution. The
+  cut is a fraction of the contribution, not of the loan, so it depends on
+  neither the loan's size nor its asset.
+- No tokens move. The borrower keeps the unpaid principal, and the treasury
+  of the loan's own asset absorbs the loss. That asset's outstanding principal
+  (A5) is written off. Nothing is recovered from the base token.
+- The borrower forfeits their unclaimed base-token yield (#89).
+- Members have no exit claim on non-base assets, so a default in asset B only
+  reduces the borrower's base-token exit share.
+
+**Tested:** ✅ `tests::loans::default_in_second_asset` (non-base asset),
+`tests::loans::loan_default_applies_penalty_and_frees_borrower` (base token)
+(`contracts/dao/src/tests/loans.rs`)
+
+---
+
 ## Lifecycle invariants
 
 ### L1 — `loan_id == proposal_id`

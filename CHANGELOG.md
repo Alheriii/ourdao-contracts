@@ -19,6 +19,10 @@ All notable changes to `ourdao-contracts` are documented here. The format follow
 - `docs/events.schema.json`: machine-readable event schema covering all contract event topics (#344).
 - `treasury::tally` and `loans::vote_on_loan_proposal` read the active-member count (and policy/threshold) once per call (#355).
 - `bench-cost.sh` now runs a real `test_budget_scaling` benchmark that also covers `request_loan_in_asset`, `repay_loan_in_asset` and `propose_withdrawal_in_asset` (#354).
+- `get_treasury_accounting(asset)` reconciliation view returning `TreasuryAccounting { token_balance, staked, outstanding_principal }`. It is backed by a new per-asset `OutstandingPrincipal` storage entry, kept in step by disbursement, repayment (including overdue penalties), default and `seed_loans` (#288).
+- Equivalence tests proving `request_loan`, `repay_loan` and `propose_treasury_withdrawal` leave the same ledger state and emit the same events as their `*_in_asset(base)` counterparts (#285).
+- `loan_lifecycle_in_second_asset` test: request → edit → vote → disburse → partial repay → full repay → yield claim in a non-base asset, checking base and asset-B balances at every step (#286).
+- `default_in_second_asset` test. Default slashing for loans in a non-base asset is documented as invariant A6 in `docs/INVARIANTS.md` (#287).
 
 ### Fixed
 - Audit all eight DAO token-transfer call sites and align state effects before external token interactions (#317).

@@ -1184,130 +1184,326 @@ fn default_penalty_rounds_up_to_favour_treasury() {
     assert_eq!(member.contribution, contribution_before - expected_penalty);
 }
 
-// Issue #504: Quota excludes phase-expired proposal before keeper finalization
-#[test]
-fn quota_excludes_phase_expired_proposal_before_keeper_finalization() {
-    let s = setup(1);
-    let borrower = s.members.get(0).unwrap();
+// ==================== issue #285: single-token loan entrypoints ====================
 
-    // Create 3 loan proposals (reaching MAX_OPEN_PROPOSALS_PER_MEMBER = 3)
-    let _p1 = s.client.request_loan(&borrower, &100, &None);
-    let _p2 = s.client.request_loan(&borrower, &100, &None);
-    let _p3 = s.client.request_loan(&borrower, &100, &None);
-
-    // 4th proposal immediately rejected with TooManyOpenProposals
-    let res = s.client.try_request_loan(&borrower, &100, &None);
-    assert_eq!(res, Err(Ok(Error::TooManyOpenProposals)));
-
-    // Advance time past editing + voting period without expiring proposals
-    advance(&s.env, EDITING + VOTING + 1);
-
-    // Now they are phase-expired, so borrower can submit new proposals
-    let res = s.client.try_request_loan(&borrower, &100, &None);
-    assert!(res.is_ok());
-}
-
-// Issue #508: Test exit share, pending yield, and loan eligibility for a fully-slashed member
-#[test]
-fn fully_slashed_member_has_zero_exit_share_and_cannot_borrow() {
+/// Request → vote → disburse → repay → claim through one entrypoint family,
+/// observing after every call. `overdue` repays past `due_time`, so the
+/// penalty path is compared too.
+fn run_loan_path(path: EntryPath, overdue: bool) -> std::vec::Vec<Observation> {
     let s = setup(3);
     let borrower = s.members.get(0).unwrap();
     let v1 = s.members.get(1).unwrap();
     let v2 = s.members.get(2).unwrap();
+    let base = s.token.address.clone();
+    let mut steps = std::vec::Vec::new();
 
-    // Repeatedly take loans and default until contribution is slashed
-    for _ in 0..5 {
-        let member = s.client.get_member(&borrower).unwrap();
-        if member.contribution == 0 {
-            break;
-        }
-        let pid = s.client.request_loan(&borrower, &100, &None);
-        advance(&s.env, EDITING + 1);
-        s.client.vote_on_loan_proposal(&v1, &pid, &true);
-        s.client.vote_on_loan_proposal(&v2, &pid, &true);
-        advance(&s.env, LOAN_DURATION + LOAN_DURATION + 1);
-        s.client.mark_loan_defaulted(&pid);
+    let pid = match path {
+        EntryPath::Legacy => s.client.request_loan(&borrower, &1_000, &None),
+        EntryPath::InBaseAsset => s
+            .client
+            .request_loan_in_asset(&borrower, &1_000, &base, &None),
+    };
+    steps.push(observe(&s.env));
+
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&v1, &pid, &true);
+    steps.push(observe(&s.env));
+    s.client.vote_on_loan_proposal(&v2, &pid, &true); // approves and disburses
+    steps.push(observe(&s.env));
+
+    if overdue {
+        advance(&s.env, LOAN_DURATION + 1);
     }
+    match path {
+        EntryPath::Legacy => s.client.repay_loan(&borrower, &pid),
+        EntryPath::InBaseAsset => s.client.repay_loan_in_asset(&borrower, &pid, &base),
+    }
+    steps.push(observe(&s.env));
+    assert_eq!(s.client.get_loan(&pid).unwrap().status, LoanStatus::Repaid);
 
-    // Set contribution directly to 0 to simulate full slashing boundary
-    s.env.as_contract(&s.client.address, || {
-        let mut rec = crate::storage::get_member(&s.env, &borrower).unwrap();
-        rec.contribution = 0;
-        crate::storage::set_member(&s.env, &rec);
-    });
-
-    // calculate_exit_share returns 0
-    assert_eq!(s.client.calculate_exit_share(&borrower), 0);
-
-    // pending_yield is 0
-    assert_eq!(s.client.get_pending_yield(&borrower), 0);
-
-    // Cannot request new loan
-    let res = s.client.try_request_loan(&borrower, &100, &None);
-    assert!(res.is_err());
-
-    // exit_dao succeeds
-    s.client.exit_dao(&borrower);
-    let member = s.client.get_member(&borrower).unwrap();
-    assert_eq!(member.status, MemberStatus::Inactive);
+    // The yield the repayment produced is the same either way.
+    s.client.claim_rewards(&v1);
+    steps.push(observe(&s.env));
+    steps
 }
 
-// Issue #517: Loan interest_rate can differ from originating proposal rate due to disbursement re-quoting
 #[test]
-fn loan_interest_rate_differs_from_proposal_rate_due_to_treasury_change() {
+fn single_token_loan_entrypoints_match_base_asset_counterparts() {
+    for overdue in [false, true] {
+        let legacy = run_loan_path(EntryPath::Legacy, overdue);
+        let in_base = run_loan_path(EntryPath::InBaseAsset, overdue);
+
+        // Every step did real work, so the comparison below isn't vacuous.
+        let topics: std::vec::Vec<_> = legacy.iter().map(|o| event_topics(&o.0)).collect();
+        for (step, expected) in ["loan_req", "loan_vote", "loan_appr", "loan_rpy", "claimed"]
+            .iter()
+            .enumerate()
+        {
+            assert!(
+                topics[step].iter().any(|t| t == expected),
+                "step {step} emitted {:?}, expected {expected}",
+                topics[step]
+            );
+        }
+        // Naming the base token records no loan asset, like the legacy path.
+        assert!(!topics[0].iter().any(|t| t == "loan_asst"));
+
+        assert_runs_identical(&legacy, &in_base);
+    }
+}
+
+// ==================== issue #287: default of a loan in a non-base asset ====================
+
+#[test]
+fn default_in_second_asset() {
     let s = setup(3);
     let borrower = s.members.get(0).unwrap();
     let v1 = s.members.get(1).unwrap();
     let v2 = s.members.get(2).unwrap();
+    let asset = whitelist_second_asset(&s, 10_000);
 
-    let pid = s.client.request_loan(&borrower, &500, &None);
-    let proposal_initial = s.client.get_loan_proposal(&pid).unwrap();
-    let voted_rate = proposal_initial.interest_rate;
+    // Give every member unclaimed base-token yield first, so the forfeiture
+    // on default is observable.
+    let base_pid = s.client.request_loan(&v1, &1_000, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&v2, &base_pid, &true);
+    s.client.vote_on_loan_proposal(&borrower, &base_pid, &true);
+    s.client.repay_loan(&v1, &base_pid);
+    let accrued = s.client.get_pending_yield(&borrower);
+    assert!(accrued > 0);
 
+    let pid = s
+        .client
+        .request_loan_in_asset(&borrower, &4_000, &asset.address, &None);
     advance(&s.env, EDITING + 1);
     s.client.vote_on_loan_proposal(&v1, &pid, &true);
     s.client.vote_on_loan_proposal(&v2, &pid, &true);
-
-    // Vote completed and loan approved/disbursed
     let loan = s.client.get_loan(&pid).unwrap();
-    let proposal_after = s.client.get_loan_proposal(&pid).unwrap();
+    assert_eq!(loan.principal, 4_000);
 
-    // Both remain independently queryable
-    assert_eq!(proposal_after.interest_rate, voted_rate);
-    assert_eq!(loan.id, pid);
-    assert_eq!(loan.total_repayment, loan.principal + (loan.principal * loan.interest_rate as i128 + BASIS_POINTS - 1) / BASIS_POINTS);
+    let base_treasury = s.client.get_treasury_balance();
+    let asset_treasury = s.client.get_treasury_balance_in_asset(&asset.address);
+    let borrower_asset = asset.balance(&borrower);
+    let contribution_before = s.client.get_member(&borrower).unwrap().contribution;
+    assert_eq!(
+        s.client
+            .get_treasury_accounting(&asset.address)
+            .outstanding_principal,
+        4_000
+    );
+
+    advance(&s.env, LOAN_DURATION + 1); // past due_time, grace period is 0
+    s.client.mark_loan_defaulted(&pid);
+    let default_events = s.env.events().all();
+    assert_eq!(
+        s.client.get_loan(&pid).unwrap().status,
+        LoanStatus::Defaulted
+    );
+
+    // The slashed claim is the borrower's base-token `contribution` (their
+    // share of the base treasury at exit), cut by `default_penalty_bps`
+    // exactly as for a base-token default. Nothing in asset B is slashed.
+    let expected_penalty = (contribution_before * 2_000 + 10_000 - 1) / 10_000;
+    let member = s.client.get_member(&borrower).unwrap();
+    assert_eq!(member.contribution, contribution_before - expected_penalty);
+    assert!(!member.has_active_loan);
+    assert_eq!(member.active_loans, 0);
+    let dflt = default_events
+        .events()
+        .iter()
+        .find(|e| event_topics(core::slice::from_ref(*e)) == ["loan_dflt"])
+        .expect("loan_dflt event not found");
+    let ContractEventBody::V0(body) = &dflt.body;
+    let ScVal::Vec(Some(data)) = &body.data else {
+        panic!("unexpected loan_dflt data: {:?}", body.data);
+    };
+    assert_eq!(data[0], ScVal::U32(pid));
+    assert_eq!(
+        data[2],
+        ScVal::I128(soroban_sdk::xdr::Int128Parts {
+            hi: 0,
+            lo: expected_penalty as u64,
+        })
+    );
+
+    // No tokens move on default. The borrower keeps the asset-B principal and
+    // the asset-B treasury absorbs the loss: the outstanding principal is
+    // written off, not recovered from the base token.
+    assert_eq!(asset.balance(&borrower), borrower_asset);
+    assert_eq!(
+        s.client.get_treasury_balance_in_asset(&asset.address),
+        asset_treasury
+    );
+    assert_eq!(s.client.get_treasury_balance(), base_treasury);
+    assert_eq!(
+        s.client
+            .get_treasury_accounting(&asset.address)
+            .outstanding_principal,
+        0
+    );
+
+    // Unclaimed base-token yield is forfeited; everyone else keeps theirs.
+    assert_eq!(s.client.get_pending_yield(&borrower), 0);
+    assert_eq!(s.client.get_pending_yield(&v2), accrued);
+
+    // The reduced contribution shrinks the base-token exit share. The exit
+    // share never includes asset B, so exiting pays out base token only.
+    let expected_share = base_treasury * member.contribution / (3 * FEE - expected_penalty);
+    assert_eq!(s.client.calculate_exit_share(&borrower), expected_share);
+    let borrower_base = s.token.balance(&borrower);
+    s.client.exit_dao(&borrower);
+    assert_eq!(s.token.balance(&borrower), borrower_base + expected_share);
+    assert_eq!(asset.balance(&borrower), borrower_asset);
+    assert_eq!(
+        s.client.get_treasury_balance_in_asset(&asset.address),
+        asset_treasury
+    );
 }
 
-// Issue #516: Overdue penalty tested across partial repayments
+// ==================== issue #286: full lifecycle of a loan in a non-base asset ====================
+
 #[test]
-fn overdue_penalty_tested_across_partial_payments() {
+fn loan_lifecycle_in_second_asset() {
     let s = setup(3);
     let borrower = s.members.get(0).unwrap();
     let v1 = s.members.get(1).unwrap();
     let v2 = s.members.get(2).unwrap();
+    let base = s.token.address.clone();
+    let b = whitelist_second_asset(&s, 10_000);
+    let dao = s.client.address.clone();
 
-    let pid = s.client.request_loan(&borrower, &500, &None);
+    // Base-token yield from an earlier base loan, so the claim at the end
+    // pays something and shows the asset-B loan never changed it.
+    let base_pid = s.client.request_loan(&v1, &1_000, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&v2, &base_pid, &true);
+    s.client.vote_on_loan_proposal(&borrower, &base_pid, &true);
+    s.client.repay_loan(&v1, &base_pid);
+    let base_yield = s.client.get_pending_yield(&v2);
+    assert!(base_yield > 0);
+
+    let base_treasury = s.client.get_treasury_balance();
+    let borrower_base = s.token.balance(&borrower);
+    let assert_base_untouched = || {
+        assert_eq!(s.client.get_treasury_balance(), base_treasury);
+        assert_eq!(s.token.balance(&borrower), borrower_base);
+        assert_eq!(s.client.get_pending_yield(&v2), base_yield);
+        assert_eq!(
+            s.client
+                .get_treasury_accounting(&base)
+                .outstanding_principal,
+            0
+        );
+    };
+    let outstanding_b = || {
+        s.client
+            .get_treasury_accounting(&b.address)
+            .outstanding_principal
+    };
+
+    // 1. Request: sized and priced against asset B's 10_000 treasury.
+    // ratio 2_000 bps → rate 500 + 300 = 800 → interest 160.
+    let pid = s
+        .client
+        .request_loan_in_asset(&borrower, &2_000, &b.address, &None);
+    let quoted = s.client.get_loan_proposal(&pid).unwrap();
+    assert_eq!(quoted.interest_rate, 800);
+    assert_eq!(quoted.total_repayment, 2_160);
+    assert_eq!(b.balance(&dao), 10_000);
+    assert_eq!(b.balance(&borrower), 0);
+    assert_eq!(outstanding_b(), 0);
+    assert_base_untouched();
+
+    // 2. Edit: re-quoted against asset B, not the much smaller base treasury
+    // (which would price 3_000 at the 20% cap).
+    // ratio 3_000 bps → rate 500 + 450 = 950 → interest 285.
+    s.client.edit_loan_proposal(&borrower, &pid, &3_000);
+    let edited = s.client.get_loan_proposal(&pid).unwrap();
+    assert_eq!(edited.amount, 3_000);
+    assert_eq!(edited.interest_rate, 950);
+    assert_eq!(edited.total_repayment, 3_285);
+    assert_ne!(
+        s.client.calculate_loan_terms(&3_000).interest_rate,
+        edited.interest_rate
+    );
+    assert_eq!(b.balance(&dao), 10_000);
+    assert_eq!(b.balance(&borrower), 0);
+    assert_base_untouched();
+
+    // 3. Vote: an asset-B withdrawal leaves too little B to fund the loan,
+    // so the approved proposal waits for disbursement instead of paying out.
+    let dest = Address::generate(&s.env);
+    let reason = String::from_str(&s.env, "drain asset b");
+    let tid = s
+        .client
+        .propose_withdrawal_in_asset(&v1, &8_000, &b.address, &dest, &reason, &false);
+    s.client.vote_on_treasury_proposal(&v1, &tid, &true);
+    s.client.vote_on_treasury_proposal(&v2, &tid, &true);
+    assert_eq!(b.balance(&dest), 8_000);
+    assert_eq!(b.balance(&dao), 2_000);
+
     advance(&s.env, EDITING + 1);
     s.client.vote_on_loan_proposal(&v1, &pid, &true);
     s.client.vote_on_loan_proposal(&v2, &pid, &true);
+    assert!(emitted(&s.env, "loan_wait"));
+    assert_eq!(
+        s.client.get_loan_proposal(&pid).unwrap().status,
+        ProposalStatus::ApprovedPendingDisbursement
+    );
+    assert!(s.client.get_loan(&pid).is_none());
+    assert_eq!(b.balance(&dao), 2_000);
+    assert_eq!(b.balance(&borrower), 0);
+    assert_eq!(outstanding_b(), 0);
+    assert_base_untouched();
 
-    let loan_before = s.client.get_loan(&pid).unwrap();
-    let initial_repayment = loan_before.total_repayment;
+    // 4. Disburse: once asset B is topped up, the same proposal pays out in B.
+    mint_asset(&s, &b.address, &dao, 8_000);
+    s.client.disburse_approved_loan(&pid);
+    let loan = s.client.get_loan(&pid).unwrap();
+    assert_eq!(loan.status, LoanStatus::Active);
+    assert_eq!(loan.principal, 3_000);
+    assert_eq!(loan.total_repayment, 3_285);
+    assert_eq!(b.balance(&borrower), 3_000);
+    assert_eq!(b.balance(&dao), 7_000);
+    assert_eq!(
+        s.client.get_treasury_accounting(&b.address),
+        crate::types::TreasuryAccounting {
+            token_balance: 7_000,
+            staked: 0,
+            outstanding_principal: 3_000,
+        }
+    );
+    assert_base_untouched();
 
-    // Advance beyond due time
-    advance(&s.env, LOAN_DURATION + 10);
+    // 5. Partial repay in B: interest (285) first, then 1_000 of principal.
+    mint_asset(&s, &b.address, &borrower, 285);
+    s.client.repay_loan_partial(&borrower, &pid, &1_285);
+    let loan = s.client.get_loan(&pid).unwrap();
+    assert_eq!(loan.status, LoanStatus::Active);
+    assert_eq!(loan.amount_repaid, 1_285);
+    assert_eq!(b.balance(&borrower), 2_000);
+    assert_eq!(b.balance(&dao), 8_285);
+    assert_eq!(outstanding_b(), 2_000);
+    // Interest paid in asset B is not distributed as base-token yield.
+    assert_base_untouched();
 
-    // Mint extra tokens so borrower can repay
-    s.token.mint(&borrower, &10_000);
+    // 6. Full repay, naming asset B.
+    s.client.repay_loan_in_asset(&borrower, &pid, &b.address);
+    assert_eq!(s.client.get_loan(&pid).unwrap().status, LoanStatus::Repaid);
+    assert!(!s.client.get_member(&borrower).unwrap().has_active_loan);
+    assert_eq!(b.balance(&borrower), 0);
+    assert_eq!(b.balance(&dao), 10_285);
+    assert_eq!(outstanding_b(), 0);
+    assert_base_untouched();
 
-    // First partial repayment
-    s.client.repay_loan_partial(&borrower, &pid, &100);
-    let loan_after_first = s.client.get_loan(&pid).unwrap();
-    assert!(loan_after_first.total_repayment >= initial_repayment);
-
-    // Second partial repayment
-    s.client.repay_loan_partial(&borrower, &pid, &100);
-    let loan_after_second = s.client.get_loan(&pid).unwrap();
-    assert_eq!(loan_after_second.amount_repaid, 200);
-}
+    // 7. Yield claim: pays exactly the base-token yield accrued before the
+    // asset-B loan, in the base token. The asset-B interest (285) is not
+    // distributed and stays in the asset-B treasury; per-asset yield is #271.
+    let v2_base = s.token.balance(&v2);
+    assert_eq!(s.client.claim_rewards(&v2), base_yield);
+    assert_eq!(s.token.balance(&v2), v2_base + base_yield);
+    assert_eq!(b.balance(&v2), 0);
+    assert_eq!(s.client.get_pending_yield(&v2), 0);
+    assert_eq!(b.balance(&dao), 10_285);
+    assert_eq!(s.client.get_treasury_balance(), base_treasury - base_yield);
 }
