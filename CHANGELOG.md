@@ -17,6 +17,7 @@ All notable changes to `ourdao-contracts` are documented here. The format follow
 - `staked` and `unstaked` events now include the resulting voting weight (#348).
 
 ### Added
+- Per-asset yield accumulators, remainders and member snapshots. Loan interest is credited and claimed in the loan's asset; `exit_dao` settles accrued yield in every tracked asset while preserving the existing base-token claim API (#271).
 - `scripts/deploy-testnet.sh` deploys a second test asset (`OURTESTB`) on testnet and proposes it for the treasury whitelist; `DEPLOYMENTS.md` tracks it (#342).
 - `get_member_overview(member)` view returning the member record, stake, pending yield, loan stats, registered name and delegate in one call (#340).
 - `get_delegate(delegator)` view returning the address a member delegated their vote to, or `None` (#341).
@@ -31,6 +32,7 @@ All notable changes to `ourdao-contracts` are documented here. The format follow
 - `tre_exp` event on successful treasury proposal expiry, documented in the README and `docs/events.schema.json` (#477).
 
 ### Fixed
+- `remove_token` now rejects removal while the treasury still holds any balance of that asset (#272).
 - Audit all eight DAO token-transfer call sites and align state effects before external token interactions (#317).
 - Enforce and regression-test admin-only `unpause`: the dedicated pauser may pause but cannot resume the DAO (#319).
 - Fixed `vote_batch` to authenticate the voter once for the batch instead of re-authorizing per proposal vote, preventing auth collisions (#308).
