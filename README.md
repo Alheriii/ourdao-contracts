@@ -205,6 +205,8 @@ The *k*-th bonus vote starts at `k² × 100` staked tokens, so the thresholds ar
 |---|---|
 | `commit_treasury_vote(voter, proposal_id, commitment)` | `commitment = sha256(XDR(voter) ++ proposal_id_be ++ support_byte ++ salt)`. |
 | `reveal_treasury_vote(voter, proposal_id, support, salt)` | Verifies the commitment, then tallies through the shared path. |
+| `verify_commitment(voter, proposal_id, support, salt) -> bool` | Read-only reveal pre-check; `false` when no commitment matches. |
+| `get_commit_reveal_window(proposal_id) -> Result<(u64, u64), Error>` | `(commit_end, reveal_end)` for a private proposal; `NotAuthorized` for a public one. |
 
 **Content-hash documents**
 
@@ -243,6 +245,7 @@ Every state-changing call publishes an event, which `ourdao-backend` indexes sin
 | `tre_prop` | `(id, amount, destination, private)` | `propose_treasury_withdrawal` |
 | `tre_vote` | `(id, voter, support)` | `vote_on_treasury_proposal` |
 | `tre_exec` | `(id, amount, destination)` | auto-fired on execution |
+| `tre_exp` | `(proposal_id, proposer)` | `expire_treasury_proposal` (permissionless keeper) |
 | `loan_asst` / `tre_asset` | `(id, asset)` | `request_loan_in_asset` / `propose_withdrawal_in_asset`, only when `asset` isn't the base token |
 | `prop_canc` | `(proposal_id, timestamp)` | `cancel_loan_proposal` / `cancel_treasury_proposal` |
 | `tok_prop` | `(caller, token, execution_time)` | `propose_token_addition` |

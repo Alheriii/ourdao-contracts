@@ -11,8 +11,43 @@ use soroban_sdk::{symbol_short, xdr::ToXdr, Address, Bytes, BytesN, Env};
 use crate::error::Error;
 use crate::storage;
 use crate::treasury;
-use crate::types::ProposalStatus;
+use crate::types::{ProposalStatus, TreasuryProposal};
 use crate::util;
+
+/// The commit phase closes one voting period after creation; the reveal phase
+/// closes one more voting period after that. Shared by the phase guards, the
+/// shared tally, and the public window view so clients and the contract agree.
+pub fn commit_reveal_window(proposal: &TreasuryProposal) -> (u64, u64) {
+    let commit_end = proposal.created_at + proposal.voting_period;
+    let reveal_end = commit_end + proposal.voting_period;
+    (commit_end, reveal_end)
+}
+
+/// Read-only pre-check for a reveal. Returns `false` for both a missing
+/// commitment and a mismatched `(support, salt)` so callers can avoid paying
+/// for a reveal transaction that cannot succeed.
+pub fn verify_commitment(
+    env: &Env,
+    voter: Address,
+    proposal_id: u32,
+    support: bool,
+    salt: &BytesN<32>,
+) -> bool {
+    let Some(stored) = storage::get_commit(env, proposal_id, &voter) else {
+        return false;
+    };
+    stored == compute_commitment(env, &voter, proposal_id, support, salt)
+}
+
+/// Public view of the commit/reveal boundaries for a private proposal.
+pub fn get_commit_reveal_window(env: &Env, proposal_id: u32) -> Result<(u64, u64), Error> {
+    let proposal =
+        storage::get_treasury_proposal(env, proposal_id).ok_or(Error::TreasuryProposalNotFound)?;
+    if !proposal.private {
+        return Err(Error::NotAuthorized);
+    }
+    Ok(commit_reveal_window(&proposal))
+}
 
 /// Domain-bound commitment: SHA256(XDR(voter) || proposal_id_be || support_byte || salt).
 /// The voter and proposal binding prevents commitment copying and cross-proposal reuse.
@@ -56,7 +91,7 @@ pub fn commit_vote(
     if proposal.status != ProposalStatus::Pending {
         return Err(Error::NotInVotingPhase);
     }
-    if env.ledger().timestamp() > proposal.created_at + proposal.voting_period {
+    if env.ledger().timestamp() > commit_reveal_window(&proposal).0 {
         return Err(Error::VotingEnded);
     }
     if storage::has_treasury_voted(env, proposal_id, &voter) {
@@ -91,8 +126,7 @@ pub fn reveal_vote(
     if !proposal.private {
         return Err(Error::NotAuthorized);
     }
-    let commit_end = proposal.created_at + proposal.voting_period;
-    let reveal_end = commit_end + proposal.voting_period;
+    let (commit_end, reveal_end) = commit_reveal_window(&proposal);
     if env.ledger().timestamp() <= commit_end {
         return Err(Error::NotYetRevealed);
     }

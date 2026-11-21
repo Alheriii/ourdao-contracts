@@ -506,6 +506,20 @@
       "properties": {},
       "additionalProperties": false
     },
+    "tre_exp": {
+      "type": "object",
+      "properties": {
+        "proposal_id": {
+          "type": "integer"
+        },
+        "proposer": {
+          "type": "string",
+          "format": "address"
+        }
+      },
+      "required": ["proposal_id", "proposer"],
+      "additionalProperties": false
+    },
     "joined": {
       "type": "object",
       "properties": {
