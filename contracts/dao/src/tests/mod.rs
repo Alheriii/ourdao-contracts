@@ -9,6 +9,7 @@ mod privacy;
 mod properties;
 mod registry;
 mod staking;
+mod stateful;
 mod treasury;
 mod issue309_policy_timelock;
 mod issue310_snapshot;

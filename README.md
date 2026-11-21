@@ -502,3 +502,14 @@ measured (protocol 29, October 2026), which moves the ceilings to 386 and
 390; check current values with `stellar network settings --network <name>`.
 Raising the ceiling needs those scans replaced with running totals kept up
 to date on join, exit, default and delegation.
+
+
+### Stateful and property tests
+
+For a fast CI run:
+
+```bash
+cargo test -p ourdao-dao stateful_actions_preserve_invariants
+cargo test -p ourdao-dao distribute_interest_preserves_tokens
+cargo test -p ourdao-dao member_counters_match_member_records_across_join_exit_rejoin
+
