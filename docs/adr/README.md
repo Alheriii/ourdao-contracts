@@ -24,4 +24,5 @@ Per ADR-0001, accepted decisions are immutable architecture history. Moving an A
 | [0008](./0008-early-repayment.md) | Early repayment discount | Proposed |
 | [0009](./0009-max-open-proposals-policy.md) | Evaluation of MAX_OPEN_PROPOSALS_PER_MEMBER in LoanPolicy | Proposed |
 | [0010](./0010-multi-asset-exit.md) | Multi-asset member exit payouts | Proposed |
+| [0011](./0011-per-asset-yield.md) | Per-asset yield accounting | Proposed |
 
