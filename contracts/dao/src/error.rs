@@ -73,4 +73,7 @@ pub enum Error {
     NoPendingPolicy = 77,
     /// Proposal metadata CID is invalid (#194).
     InvalidMetadataCid = 78,
+    /// The voter joined (or rejoined) the DAO after the proposal was created,
+    /// so they are outside the electorate its quorum was fixed against (#73).
+    JoinedAfterProposal = 79,
 }

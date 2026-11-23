@@ -96,6 +96,10 @@ pub struct LoanProposal {
     pub metadata_cid: Option<String>,
     /// Timestamp of the last `edit_loan_proposal` call (`None` if never edited).
     pub last_edited_at: Option<u64>,
+    /// Active-member count when the proposal was created. Quorum and the
+    /// early-rejection bound are computed from this, not the live count, so
+    /// membership churn during the vote cannot move the bar (#73).
+    pub active_members: u32,
 }
 
 #[contracttype]
@@ -136,6 +140,9 @@ pub struct TreasuryProposal {
     pub treasury_threshold: u32,
     /// When true, votes must be committed then revealed (commit-reveal privacy).
     pub private: bool,
+    /// Active-member count when the proposal was created. See
+    /// `LoanProposal.active_members` (#73).
+    pub active_members: u32,
 }
 
 /// Computed loan terms returned by the read-only quote helper.

@@ -107,6 +107,7 @@ pub fn request_loan(
         voting_period: policy.voting_period,
         metadata_cid,
         last_edited_at: None,
+        active_members: storage::get_active_members(env),
     };
     storage::set_loan_proposal(env, &proposal);
     storage::extend_instance(env);
@@ -193,7 +194,7 @@ pub fn vote_on_loan_proposal(
 ) -> Result<(), Error> {
     util::require_initialized(env)?;
     util::require_not_paused(env)?;
-    util::require_active_member(env, &voter)?;
+    let member = util::require_active_member(env, &voter)?;
 
     let mut proposal = storage::get_loan_proposal(env, proposal_id)
         .ok_or(Error::ProposalNotFound)
@@ -212,6 +213,7 @@ pub fn vote_on_loan_proposal(
     if storage::has_loan_voted(env, proposal_id, &voter) {
         return Err(Error::AlreadyVoted);
     }
+    util::require_in_electorate(&member, proposal.created_at)?;
 
     let weight = util::voting_weight(env, &voter);
     if support {
@@ -230,10 +232,8 @@ pub fn vote_on_loan_proposal(
     } else {
         storage::get_threshold(env)
     };
-    let required = util::required_votes(
-        storage::get_active_members(env),
-        threshold,
-    );
+    // Quorum is fixed against the electorate snapshotted at creation (#73).
+    let required = util::required_votes(proposal.active_members, threshold);
     if proposal.for_votes >= required && proposal.status == ProposalStatus::Pending {
         proposal.status = ProposalStatus::ApprovedPendingDisbursement;
         proposal.phase = ProposalPhase::Executed;
@@ -247,7 +247,7 @@ pub fn vote_on_loan_proposal(
             );
         }
     } else if proposal.status == ProposalStatus::Pending {
-        let remaining = storage::get_active_members(env).saturating_sub(proposal.votes_cast);
+        let remaining = proposal.active_members.saturating_sub(proposal.votes_cast);
         let max_remaining = remaining as i128 * (1 + util::MAX_STAKE_BONUS);
         if proposal.for_votes + max_remaining < required {
             proposal.status = ProposalStatus::Rejected;

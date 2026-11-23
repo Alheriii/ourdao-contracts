@@ -43,6 +43,7 @@ This repository is one of three that make up OurDAO:
 - **Lending** — members request loans that go through a fixed editable draft phase, then member voting weighted by stake-boosted voting power. On reaching the consensus threshold the loan is automatically approved and the principal disbursed from the treasury — no separate "execute" step. Interest is computed from a loan-size-relative-to-treasury curve, clamped to the policy's min/max rate. Repaying a loan returns the principal to the treasury and splits the interest across all active members as claimable yield.
 - **Loan defaults** — an overdue loan (past `due_time` plus a configurable grace period) can be marked defaulted by **anyone**, not just an admin — an on-chain keeper pattern. Defaulting slashes a policy-defined share of the borrower's treasury claim and frees their `has_active_loan` flag, so they can still exit the DAO with their reduced share or borrow again after the normal cooldown. This closes what was previously the DAO's most notable functional gap: prior to this, an overdue loan had zero on-chain consequence.
 - **Treasury** — any member can propose a withdrawal to any destination; execution requires a higher (60%) consensus than loan approval, reflecting the larger blast radius of moving treasury funds arbitrarily.
+- **Quorum is fixed when a proposal is created.** Loan and treasury proposals store the active-member count at creation (`active_members`), and both the approval bar (`ceil(active_members × threshold / 10_000)`) and the early-rejection bound are computed from it for the proposal's whole life. Members exiting mid-vote cannot lower the bar, and members joining mid-vote cannot raise it. The electorate is fixed too: a member who joined, or rejoined, after a proposal was created gets `JoinedAfterProposal` (79) if they try to vote, commit or reveal on it, because counting their vote against a bar that never included them would let new sign-ups decide it. They vote normally on proposals created after they joined. Membership is timestamped by ledger time, so a member who joins in the same ledger a proposal is created in is part of its electorate.
 - **Safety** — admin pause/unpause blocks all state-changing operations instantly (except loan repayments, which remain available to prevent forcing borrowers into default), and extensive view functions let any client inspect full DAO state without needing an indexer for real-time reads.
 
 ## Additional feature modules
@@ -210,6 +211,7 @@ Numeric codes are stable and part of the ABI — new variants get appended rathe
 | 50 | Treasury: `TreasuryProposalNotFound` |
 | 60–67 | Native-swap modules: `NameTaken`, `NameNotFound`, `NoStake`, `InsufficientStake`, `NoCommitment`, `CommitmentMismatch`, `AlreadyRevealed`, `NothingToClaim` |
 | 70–72 | Appended: `ProposalNotExpired`, `InvalidName`, `NotYetRevealed` |
+| 79 | Appended: `JoinedAfterProposal` — voter joined after the proposal was created (#73) |
 
 ## Build & test
 

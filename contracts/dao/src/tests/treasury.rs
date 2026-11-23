@@ -173,3 +173,87 @@ fn non_member_can_execute_approved_treasury_proposal_without_auth() {
     );
     assert_eq!(s.token.balance(&dest), dest_bal + 2_500);
 }
+
+// ── #73: quorum is fixed at proposal creation ────────────────────────────────
+
+#[test]
+fn members_exiting_mid_vote_do_not_lower_treasury_quorum() {
+    // 10 members at creation, 51% => 6 votes required.
+    let s = setup(10);
+    let dest = Address::generate(&s.env);
+    let reason = String::from_str(&s.env, "grant");
+    let tid = s.client.propose_treasury_withdrawal(
+        &s.members.get(0).unwrap(),
+        &100,
+        &dest,
+        &reason,
+        &false,
+    );
+    assert_eq!(
+        s.client.get_treasury_proposal(&tid).unwrap().active_members,
+        10
+    );
+
+    for i in 0..5 {
+        s.client
+            .vote_on_treasury_proposal(&s.members.get(i).unwrap(), &tid, &true);
+    }
+    s.client.exit_dao(&s.members.get(8).unwrap());
+    s.client.exit_dao(&s.members.get(9).unwrap());
+
+    // With a live count of 8 the bar would be 5 and this against-vote would
+    // execute the withdrawal on five in-favour votes.
+    s.client
+        .vote_on_treasury_proposal(&s.members.get(5).unwrap(), &tid, &false);
+    assert_eq!(
+        s.client.get_treasury_proposal(&tid).unwrap().status,
+        ProposalStatus::Pending
+    );
+    assert_eq!(s.token.balance(&dest), 0);
+
+    s.client
+        .vote_on_treasury_proposal(&s.members.get(6).unwrap(), &tid, &true);
+    assert_eq!(
+        s.client.get_treasury_proposal(&tid).unwrap().status,
+        ProposalStatus::Executed
+    );
+    assert_eq!(s.token.balance(&dest), 100);
+}
+
+#[test]
+fn members_joining_mid_vote_cannot_vote_on_treasury_proposal() {
+    let s = setup(3);
+    let dest = Address::generate(&s.env);
+    let reason = String::from_str(&s.env, "grant");
+    let tid = s.client.propose_treasury_withdrawal(
+        &s.members.get(0).unwrap(),
+        &100,
+        &dest,
+        &reason,
+        &false,
+    );
+    s.client
+        .vote_on_treasury_proposal(&s.members.get(0).unwrap(), &tid, &true);
+
+    advance(&s.env, 1);
+    let late = Address::generate(&s.env);
+    soroban_sdk::token::StellarAssetClient::new(&s.env, &s.token.address).mint(&late, &MINT);
+    s.client.register_member(&late);
+    refill_treasury(&s);
+    assert_eq!(s.client.get_active_members(), 5); // a live bar would now be 3
+
+    // The late joiners are outside the electorate (checked in the shared
+    // tally path, so commit-reveal reveals get the same rule).
+    assert_eq!(
+        s.client.try_vote_on_treasury_proposal(&late, &tid, &true),
+        Err(Ok(Error::JoinedAfterProposal))
+    );
+
+    // The second original vote reaches the snapshotted bar of 2.
+    s.client
+        .vote_on_treasury_proposal(&s.members.get(1).unwrap(), &tid, &true);
+    assert_eq!(
+        s.client.get_treasury_proposal(&tid).unwrap().status,
+        ProposalStatus::Executed
+    );
+}

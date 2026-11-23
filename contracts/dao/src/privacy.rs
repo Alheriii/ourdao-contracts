@@ -34,13 +34,16 @@ pub fn commit_vote(
 ) -> Result<(), Error> {
     util::require_initialized(env)?;
     util::require_not_paused(env)?;
-    util::require_active_member(env, &voter)?;
+    let member = util::require_active_member(env, &voter)?;
 
     let proposal =
         storage::get_treasury_proposal(env, proposal_id).ok_or(Error::TreasuryProposalNotFound)?;
     if !proposal.private {
         return Err(Error::NotAuthorized);
     }
+    // Fail at commit rather than letting the commitment be stored and only
+    // rejected at reveal (#73).
+    util::require_in_electorate(&member, proposal.created_at)?;
     if proposal.status != ProposalStatus::Pending {
         return Err(Error::NotInVotingPhase);
     }

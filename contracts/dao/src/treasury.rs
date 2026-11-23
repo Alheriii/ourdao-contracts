@@ -43,6 +43,7 @@ pub fn propose_withdrawal(
         voting_period: storage::get_policy(env).voting_period,
         treasury_threshold: storage::get_policy(env).treasury_threshold,
         private,
+        active_members: storage::get_active_members(env),
     };
     storage::set_treasury_proposal(env, &proposal);
     storage::extend_instance(env);
@@ -92,6 +93,10 @@ pub fn tally(
     if storage::has_treasury_voted(env, proposal.id, voter) {
         return Err(Error::AlreadyVoted);
     }
+    // Callers have already checked `voter` is an active member; this adds the
+    // electorate rule for both open votes and commit-reveal reveals (#73).
+    let member = storage::get_member(env, voter).ok_or(Error::NotMember)?;
+    util::require_in_electorate(&member, proposal.created_at)?;
 
     let weight = util::voting_weight(env, voter);
     if support {
@@ -106,10 +111,8 @@ pub fn tally(
         (proposal.id, voter.clone(), support),
     );
 
-    let required = util::required_votes(
-        storage::get_active_members(env),
-        proposal.treasury_threshold,
-    );
+    // Quorum is fixed against the electorate snapshotted at creation (#73).
+    let required = util::required_votes(proposal.active_members, proposal.treasury_threshold);
     if proposal.for_votes >= required {
         proposal.status = ProposalStatus::ApprovedPendingDisbursement;
         storage::set_treasury_proposal(env, &proposal);
@@ -118,7 +121,7 @@ pub fn tally(
                 .publish((symbol_short!("tre_wait"),), (proposal.id, proposal.amount));
         }
     } else {
-        let remaining = storage::get_active_members(env).saturating_sub(proposal.votes_cast);
+        let remaining = proposal.active_members.saturating_sub(proposal.votes_cast);
         let max_remaining = remaining as i128 * (1 + util::MAX_STAKE_BONUS);
         if proposal.for_votes + max_remaining < required {
             proposal.status = ProposalStatus::Rejected;

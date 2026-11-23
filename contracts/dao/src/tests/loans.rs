@@ -812,3 +812,109 @@ fn shortening_grace_after_disbursement_does_not_accelerate_default() {
     s.client.mark_loan_defaulted(&id);
     assert_eq!(s.client.get_loan(&id).unwrap().status, LoanStatus::Defaulted);
 }
+
+// ── #73: quorum is fixed at proposal creation ────────────────────────────────
+
+/// Adds a new member (mints their fee first) and returns their address.
+fn join_new_member(s: &Setup) -> Address {
+    let m = Address::generate(&s.env);
+    soroban_sdk::token::StellarAssetClient::new(&s.env, &s.token.address).mint(&m, &MINT);
+    s.client.register_member(&m);
+    m
+}
+
+#[test]
+fn loan_proposal_snapshots_active_members() {
+    let s = setup(5);
+    let pid = s
+        .client
+        .request_loan(&s.members.get(0).unwrap(), &500, &None);
+    assert_eq!(s.client.get_loan_proposal(&pid).unwrap().active_members, 5);
+}
+
+#[test]
+fn members_exiting_mid_vote_do_not_lower_loan_quorum() {
+    // 10 members at creation, 51% => 6 votes required for the proposal's lifetime.
+    let s = setup(10);
+    let borrower = s.members.get(0).unwrap();
+    let pid = s.client.request_loan(&borrower, &500, &None);
+    advance(&s.env, EDITING + 1);
+
+    for i in 1..=5 {
+        s.client
+            .vote_on_loan_proposal(&s.members.get(i).unwrap(), &pid, &true);
+    }
+    // Two members who haven't voted leave: live count 8 => a live bar of 5.
+    s.client.exit_dao(&s.members.get(8).unwrap());
+    s.client.exit_dao(&s.members.get(9).unwrap());
+    assert_eq!(s.client.get_active_members(), 8);
+
+    // An *against* vote must not push the proposal over on the old 5 votes.
+    s.client
+        .vote_on_loan_proposal(&s.members.get(6).unwrap(), &pid, &false);
+    let prop = s.client.get_loan_proposal(&pid).unwrap();
+    assert_eq!(prop.status, ProposalStatus::Pending);
+    assert!(s.client.get_loan(&pid).is_none());
+
+    // The sixth in-favour vote reaches the snapshotted bar.
+    s.client
+        .vote_on_loan_proposal(&s.members.get(7).unwrap(), &pid, &true);
+    assert_eq!(
+        s.client.get_loan_proposal(&pid).unwrap().status,
+        ProposalStatus::Approved
+    );
+}
+
+#[test]
+fn members_joining_mid_vote_do_not_raise_loan_quorum_and_cannot_vote() {
+    // 3 members at creation, 51% => 2 votes required.
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let pid = s.client.request_loan(&borrower, &500, &None);
+    advance(&s.env, EDITING + 1);
+
+    s.client
+        .vote_on_loan_proposal(&s.members.get(1).unwrap(), &pid, &true);
+    // (Voting starts after the editing period, so these joins are strictly
+    // later than the proposal's creation.)
+    let late1 = join_new_member(&s);
+    let _late2 = join_new_member(&s);
+    assert_eq!(s.client.get_active_members(), 5); // a live bar would now be 3
+
+    // A member who joined after creation is outside the electorate.
+    assert_eq!(
+        s.client.try_vote_on_loan_proposal(&late1, &pid, &true),
+        Err(Ok(Error::JoinedAfterProposal))
+    );
+
+    // The second original vote reaches the snapshotted bar of 2.
+    s.client
+        .vote_on_loan_proposal(&s.members.get(2).unwrap(), &pid, &true);
+    assert_eq!(
+        s.client.get_loan_proposal(&pid).unwrap().status,
+        ProposalStatus::Approved
+    );
+}
+
+#[test]
+fn member_who_joined_mid_vote_can_vote_on_later_proposals() {
+    let s = setup(3);
+    let pid = s
+        .client
+        .request_loan(&s.members.get(0).unwrap(), &500, &None);
+    advance(&s.env, 1);
+    let late = join_new_member(&s);
+    advance(&s.env, EDITING + 1);
+    assert_eq!(
+        s.client.try_vote_on_loan_proposal(&late, &pid, &true),
+        Err(Ok(Error::JoinedAfterProposal))
+    );
+
+    let pid2 = s
+        .client
+        .request_loan(&s.members.get(1).unwrap(), &500, &None);
+    assert_eq!(s.client.get_loan_proposal(&pid2).unwrap().active_members, 4);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&late, &pid2, &true);
+    assert!(s.client.has_voted(&ProposalKind::Loan, &pid2, &late));
+}
