@@ -262,6 +262,32 @@ pub fn vote_on_loan_proposal(
     Ok(())
 }
 
+/// Disburses a loan whose proposal already passed its vote but could not be
+/// paid out at the time because the treasury was short (status
+/// `ApprovedPendingDisbursement`, see `loan_wait`). Permissionless and
+/// callable by anyone, member or not — this is a keeper call, like
+/// [`mark_loan_defaulted`], not a privileged action, so there's nothing to
+/// authorize.
+///
+/// Why no auth is needed: the decision was already made by the members'
+/// vote. The borrower and principal are fixed on the stored proposal, and the
+/// terms are computed on-chain from the current policy and treasury. The
+/// caller passes only `proposal_id` and cannot redirect funds, change the
+/// amount, or pick the terms.
+///
+/// What the caller can influence: only *when* disbursement happens, and only
+/// once the treasury can cover it. The caller pays the transaction fee and
+/// receives nothing, so there is no incentive to grief; at worst an outsider
+/// does the borrower a favour by paying out early.
+///
+/// Failure mode: if the treasury still can't cover the principal this returns
+/// `InsufficientTreasury` and nothing changes. Repeated calls are safe — once
+/// disbursed, the status is `Approved` and the status guard below rejects
+/// every further call, so a loan can never be paid out twice.
+///
+/// Do not add a `require_auth` here: requiring an admin or the borrower would
+/// let a single absent party block an outcome the DAO already voted for. The
+/// `non_member_can_disburse_approved_loan_without_auth` test pins this.
 pub fn disburse_approved_loan(env: &Env, proposal_id: u32) -> Result<(), Error> {
     util::require_initialized(env)?;
     util::require_not_paused(env)?;

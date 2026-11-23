@@ -147,6 +147,8 @@ impl OurDao {
         loans::vote_on_loan_proposal(&env, voter, proposal_id, support)
     }
 
+    /// Pays out an approved loan that was waiting on treasury funds.
+    /// Permissionless keeper call — see `loans::disburse_approved_loan`.
     pub fn disburse_approved_loan(env: Env, proposal_id: u32) -> Result<(), Error> {
         loans::disburse_approved_loan(&env, proposal_id)
     }
@@ -204,6 +206,8 @@ impl OurDao {
         treasury::expire_treasury_proposal(&env, proposal_id)
     }
 
+    /// Executes an approved treasury withdrawal that was waiting on treasury
+    /// funds. Permissionless keeper call — see `treasury::execute_approved`.
     pub fn execute_treasury_proposal(
         env: Env,
         proposal_id: u32,

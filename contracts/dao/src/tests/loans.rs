@@ -671,3 +671,62 @@ fn edit_loan_proposal_emits_loan_edit_event() {
     let expected = s.client.calculate_loan_terms(&600);
     assert_eq!(after.total_repayment, expected.total_repayment);
 }
+
+// #71: `disburse_approved_loan` is a deliberate permissionless keeper call.
+// This pins that intent: a non-member with no auth at all can drive it, so
+// adding a `require_auth` to the entrypoint makes this test fail.
+#[test]
+fn non_member_can_disburse_approved_loan_without_auth() {
+    // 4 members => treasury 4000, max loan 2000 (50%), 3 of 4 votes required.
+    let s = setup(4);
+    let borrower = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+    let v3 = s.members.get(3).unwrap();
+
+    let pid = s.client.request_loan(&borrower, &1_500, &None);
+    let dest = Address::generate(&s.env);
+    let reason = String::from_str(&s.env, "drain");
+    let tid = s
+        .client
+        .propose_treasury_withdrawal(&v1, &3_000, &dest, &reason, &false);
+    for v in [&v1, &v2, &v3] {
+        s.client.vote_on_treasury_proposal(v, &tid, &true);
+    }
+
+    advance(&s.env, EDITING + 1);
+    for v in [&v1, &v2, &v3] {
+        s.client.vote_on_loan_proposal(v, &pid, &true);
+    }
+    assert_eq!(
+        s.client.get_loan_proposal(&pid).unwrap().status,
+        ProposalStatus::ApprovedPendingDisbursement
+    );
+    refill_treasury(&s);
+    refill_treasury(&s);
+
+    let keeper = Address::generate(&s.env);
+    assert!(s.client.get_member(&keeper).is_none());
+    let keeper_bal = s.token.balance(&keeper);
+    let borrower_bal = s.token.balance(&borrower);
+
+    // No mocked auths from here on: any `require_auth` in the path would fail.
+    s.env.set_auths(&[]);
+    s.client.disburse_approved_loan(&pid);
+    assert!(s.env.auths().is_empty());
+
+    assert_eq!(
+        s.client.get_loan_proposal(&pid).unwrap().status,
+        ProposalStatus::Approved
+    );
+    // Funds go to the borrower fixed on the proposal; the keeper gets nothing.
+    assert_eq!(s.token.balance(&borrower), borrower_bal + 1_500);
+    assert_eq!(s.token.balance(&keeper), keeper_bal);
+
+    // Repeated calls are rejected by the status guard: no double payout.
+    assert_eq!(
+        s.client.try_disburse_approved_loan(&pid),
+        Err(Ok(Error::NotInVotingPhase))
+    );
+    assert_eq!(s.token.balance(&borrower), borrower_bal + 1_500);
+}
