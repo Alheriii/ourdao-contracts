@@ -146,12 +146,21 @@ pub struct TreasuryProposal {
 }
 
 /// Computed loan terms returned by the read-only quote helper.
+///
+/// A quote is only honourable when `amount <= max_loan`. Above that,
+/// `request_loan` rejects the amount with `ExceedsTreasuryRatio`, and the
+/// rate shown is not one anyone can borrow at (#80).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoanTerms {
     pub interest_rate: u32,
     pub total_repayment: i128,
     pub duration: u64,
+    /// Largest principal `request_loan` would accept right now:
+    /// `treasury_balance × max_loan_to_treasury_ratio / 10_000`, or 0 when the
+    /// treasury is empty or negative (staked funds exceeding the token
+    /// balance).
+    pub max_loan: i128,
 }
 
 /// Structured event emitted when a borrower edits loan proposal terms.

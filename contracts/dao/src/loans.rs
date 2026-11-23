@@ -3,13 +3,29 @@ use soroban_sdk::{symbol_short, Address, Env, String};
 use crate::error::Error;
 use crate::storage;
 use crate::types::{
-    Loan, LoanProposal, LoanStatus, LoanTerms, LoanTermsEdited, MemberStatus, ProposalPhase,
-    ProposalStatus, BASIS_POINTS,
+    Loan, LoanPolicy, LoanProposal, LoanStatus, LoanTerms, LoanTermsEdited, MemberStatus,
+    ProposalPhase, ProposalStatus, BASIS_POINTS,
 };
 use crate::util;
 
+/// Largest principal the treasury-ratio cap allows right now. Never negative:
+/// `treasury_balance` subtracts total staked and can legitimately go below
+/// zero, and an empty or negative treasury can fund nothing.
+pub fn max_loan_amount(env: &Env, policy: &LoanPolicy) -> i128 {
+    let treasury = util::treasury_balance(env);
+    if treasury <= 0 {
+        return 0;
+    }
+    treasury * policy.max_loan_to_treasury_ratio as i128 / BASIS_POINTS
+}
+
 /// Quote the terms a loan of `amount` would carry right now. Interest scales
 /// linearly with the loan's size relative to the treasury, clamped to policy.
+///
+/// This always returns a rate, even for a loan that cannot be issued: when
+/// the treasury is empty or negative the rate is the policy maximum, and an
+/// amount above the treasury-ratio cap gets a rate too. Check
+/// `amount <= terms.max_loan` before showing a quote as available (#80).
 pub fn calculate_loan_terms(env: &Env, amount: i128) -> LoanTerms {
     let policy = storage::get_policy(env);
     let treasury = util::treasury_balance(env);
@@ -29,6 +45,7 @@ pub fn calculate_loan_terms(env: &Env, amount: i128) -> LoanTerms {
         interest_rate: rate as u32,
         total_repayment,
         duration: policy.max_loan_duration,
+        max_loan: max_loan_amount(env, &policy),
     }
 }
 
@@ -81,8 +98,9 @@ pub fn request_loan(
     is_eligible_for_loan(env, &borrower)?;
 
     let policy = storage::get_policy(env);
-    let treasury = util::treasury_balance(env);
-    let max_loan = treasury * policy.max_loan_to_treasury_ratio as i128 / BASIS_POINTS;
+    // Same cap the quote reports as `max_loan`. Clamping a negative treasury
+    // to 0 changes nothing here: `amount` is already known to be positive.
+    let max_loan = max_loan_amount(env, &policy);
     if amount > max_loan {
         return Err(Error::ExceedsTreasuryRatio);
     }

@@ -918,3 +918,64 @@ fn member_who_joined_mid_vote_can_vote_on_later_proposals() {
     s.client.vote_on_loan_proposal(&late, &pid2, &true);
     assert!(s.client.has_voted(&ProposalKind::Loan, &pid2, &late));
 }
+
+// ── #80: an unreachable quote is distinguishable ─────────────────────────────
+
+#[test]
+fn quote_reports_max_loan_within_the_ratio_cap() {
+    // 3 members => treasury 3000, 50% cap => max loan 1500.
+    let s = setup(3);
+    let terms = s.client.calculate_loan_terms(&1_000);
+    assert_eq!(terms.max_loan, 1_500);
+    assert!(1_000 <= terms.max_loan);
+
+    // The boundary is inclusive, exactly as in request_loan.
+    let at_cap = s.client.calculate_loan_terms(&1_500);
+    assert_eq!(at_cap.max_loan, 1_500);
+    s.client
+        .request_loan(&s.members.get(0).unwrap(), &1_500, &None);
+}
+
+#[test]
+fn quote_above_ratio_cap_is_marked_unreachable() {
+    let s = setup(3);
+    let terms = s.client.calculate_loan_terms(&2_000);
+    assert_eq!(terms.max_loan, 1_500);
+    assert!(2_000 > terms.max_loan);
+    // request_loan behaviour is unchanged.
+    assert_eq!(
+        s.client
+            .try_request_loan(&s.members.get(0).unwrap(), &2_000, &None),
+        Err(Ok(Error::ExceedsTreasuryRatio))
+    );
+}
+
+#[test]
+fn quote_with_empty_treasury_has_zero_max_loan() {
+    let s = setup(0);
+    assert_eq!(s.client.get_treasury_balance(), 0);
+    let terms = s.client.calculate_loan_terms(&100);
+    assert_eq!(terms.max_loan, 0);
+    // The rate is still the policy maximum, but max_loan says it can't be had.
+    assert_eq!(terms.interest_rate, 2_000);
+}
+
+#[test]
+fn quote_with_negative_treasury_has_zero_max_loan() {
+    let s = setup(3);
+    let member = s.members.get(0).unwrap();
+    // Staked funds exceeding the token balance make treasury_balance negative.
+    s.env.as_contract(&s.client.address, || {
+        crate::storage::set_total_staked(&s.env, 10_000);
+    });
+    assert!(s.client.get_treasury_balance() < 0);
+
+    let terms = s.client.calculate_loan_terms(&100);
+    assert_eq!(terms.max_loan, 0);
+    assert_eq!(terms.interest_rate, 2_000);
+    // request_loan behaviour is unchanged.
+    assert_eq!(
+        s.client.try_request_loan(&member, &100, &None),
+        Err(Ok(Error::ExceedsTreasuryRatio))
+    );
+}

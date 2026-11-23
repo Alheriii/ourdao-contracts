@@ -399,6 +399,11 @@ impl OurDao {
         }
     }
 
+    /// Quotes the terms a loan of `amount` would carry right now. The quote
+    /// can only be honoured when `amount <= max_loan`: with an empty or
+    /// negative treasury `max_loan` is 0 and the rate shown is the policy
+    /// maximum for a loan that cannot be issued. See
+    /// `loans::calculate_loan_terms`.
     pub fn calculate_loan_terms(env: Env, amount: i128) -> LoanTerms {
         loans::calculate_loan_terms(&env, amount)
     }
