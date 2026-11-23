@@ -2,7 +2,7 @@ use soroban_sdk::{token, Address, Env};
 
 use crate::error::Error;
 use crate::storage;
-use crate::types::{Member, MemberStatus};
+use crate::types::{Member, MemberStatus, ProposalStatus};
 
 /// Staked tokens are turned into bonus voting weight on a *quadratic* (square
 /// root) curve, and this is the number of staked tokens whose square root is
@@ -19,6 +19,11 @@ pub fn token_client(env: &Env) -> token::Client<'_> {
     token::Client::new(env, &storage::get_token(env))
 }
 
+/// Token client for any asset, e.g. a whitelisted non-base asset (#236).
+pub fn token_client_for<'a>(env: &'a Env, asset: &Address) -> token::Client<'a> {
+    token::Client::new(env, asset)
+}
+
 pub fn contract_address(env: &Env) -> Address {
     env.current_contract_address()
 }
@@ -26,8 +31,28 @@ pub fn contract_address(env: &Env) -> Address {
 /// Treasury == the DAO's own token balance minus funds earmarked as stake,
 /// so staked principal is never lent out or counted as distributable equity.
 pub fn treasury_balance(env: &Env) -> i128 {
-    let bal = token_client(env).balance(&contract_address(env));
-    bal - storage::get_total_staked(env)
+    treasury_balance_in_asset(env, &storage::get_token(env))
+}
+
+/// The DAO's raw holding of `asset`, staked funds included.
+pub fn treasury_balance_for(env: &Env, asset: &Address) -> i128 {
+    token_client_for(env, asset).balance(&contract_address(env))
+}
+
+/// Spendable treasury in `asset`. Staking only ever happens in the base token,
+/// so staked funds are excluded for the base token alone.
+pub fn treasury_balance_in_asset(env: &Env, asset: &Address) -> i128 {
+    treasury_balance_for(env, asset) - staked_in_asset(env, asset)
+}
+
+/// Member stake held in `asset`: the total staked for the base token, zero
+/// for any other asset.
+pub fn staked_in_asset(env: &Env, asset: &Address) -> i128 {
+    if *asset == storage::get_token(env) {
+        storage::get_total_staked(env)
+    } else {
+        0
+    }
 }
 
 pub fn require_initialized(env: &Env) -> Result<(), Error> {
@@ -47,7 +72,11 @@ pub fn require_not_paused(env: &Env) -> Result<(), Error> {
 }
 
 pub fn is_admin(env: &Env, who: &Address) -> bool {
-    storage::get_admins(env).iter().any(|a| &a == who)
+    storage::get_admins(env).contains(who)
+}
+
+pub fn is_pauser(env: &Env, who: &Address) -> bool {
+    storage::get_pauser(env).as_ref() == Some(who)
 }
 
 /// Authorizes `caller` and asserts admin membership.
@@ -73,7 +102,22 @@ pub fn require_active_member(env: &Env, caller: &Address) -> Result<Member, Erro
 /// One base vote per active member, plus a quadratic (square-root) boost for
 /// staked commitment, capped at `MAX_STAKE_BONUS`.
 pub fn voting_weight(env: &Env, who: &Address) -> i128 {
-    BASE_VOTE_WEIGHT + stake_boost(storage::get_stake(env, who))
+    if storage::get_delegation(env, who).is_some() {
+        return 0; // delegated their vote away
+    }
+    let mut total = BASE_VOTE_WEIGHT + stake_boost(storage::get_stake(env, who));
+    for member in storage::get_members(env).iter() {
+        if let Some(delegatee) = storage::get_delegation(env, &member) {
+            if delegatee == *who {
+                if let Some(m) = storage::get_member(env, &member) {
+                    if m.status == MemberStatus::ActiveMember {
+                        total += BASE_VOTE_WEIGHT + stake_boost(storage::get_stake(env, &member));
+                    }
+                }
+            }
+        }
+    }
+    total
 }
 
 /// Bonus votes earned by `staked` under the quadratic staking curve:
@@ -142,6 +186,13 @@ pub fn get_max_stake_bonus() -> i128 {
     MAX_STAKE_BONUS
 }
 
+/// Treasury-favouring ceiling division for non-negative money or rate numerators.
+/// Assumes a strictly positive denominator and non-negative numerator.
+pub fn ceil_div_nonnegative(value: i128, divisor: i128) -> i128 {
+    assert!(value >= 0 && divisor > 0);
+    value / divisor + i128::from(value % divisor != 0)
+}
+
 /// A proposal's electorate is the set of members active when it was created;
 /// its quorum is computed from that count (#73). A member who joined, or
 /// rejoined after exiting, after `proposal_created_at` was not part of that
@@ -164,4 +215,24 @@ pub fn required_votes(active_members: u32, threshold_bps: u32) -> i128 {
     let base = active_members as i128;
     let bp = crate::types::BASIS_POINTS;
     (base * threshold_bps as i128 + bp - 1) / bp
+}
+
+/// Returns the total amount committed to loan proposals that have passed
+/// quorum but have not yet been disbursed (status == ApprovedPendingDisbursement).
+/// These funds are effectively reserved and must not be double-counted as
+/// available treasury for new withdrawals (#172).
+/// Only proposals denominated in `asset` count (#236).
+pub fn reserved_loan_commitments(env: &Env, asset: &Address) -> i128 {
+    let count = storage::get_proposal_count(env, storage::DataKey::NextProposalId);
+    let mut total: i128 = 0;
+    for id in 0..count {
+        if let Some(proposal) = storage::get_loan_proposal(env, id) {
+            if proposal.status == ProposalStatus::ApprovedPendingDisbursement
+                && storage::get_loan_asset(env, id) == *asset
+            {
+                total += proposal.amount;
+            }
+        }
+    }
+    total
 }

@@ -73,7 +73,32 @@ pub enum Error {
     NoPendingPolicy = 77,
     /// Proposal metadata CID is invalid (#194).
     InvalidMetadataCid = 78,
+    /// Invalid delegation target (e.g. self-delegation) (#188).
+    InvalidDelegation = 79,
+    InvalidProposal = 80,
+    AlreadyPauser = 81,
+    NotPauser = 82,
+    /// The asset is not on the treasury whitelist (#236).
+    TokenNotWhitelisted = 83,
+    /// The asset is already on the treasury whitelist (#236).
+    TokenAlreadyWhitelisted = 84,
+    /// No addition is pending for this asset (#236).
+    NoPendingTokenAddition = 85,
+    /// The asset does not match the one the loan was issued in (#236).
+    AssetMismatch = 86,
+    /// The base token set at initialization can't be removed (#236).
+    CannotRemoveBaseToken = 87,
+    /// Seeding is locked; `lock_seeding` has already been called (#332).
+    SeedingLocked = 88,
+    /// Seeding is already locked; calling `lock_seeding` again is a no-op error (#333).
+    SeedingAlreadyLocked = 89,
+    /// Member already has the maximum number of simultaneously open proposals.
+    TooManyOpenProposals = 90,
+    /// A borrower cannot vote on their own loan proposal (#327).
+    BorrowerCannotVote = 91,
+    /// A whitelisted token with treasury funds cannot be removed (#272).
+    TokenHasBalance = 92,
     /// The voter joined (or rejoined) the DAO after the proposal was created,
     /// so they are outside the electorate its quorum was fixed against (#73).
-    JoinedAfterProposal = 79,
+    JoinedAfterProposal = 93,
 }

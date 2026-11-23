@@ -7,6 +7,7 @@ use soroban_sdk::{symbol_short, Address, Env};
 
 use crate::error::Error;
 use crate::storage;
+use crate::types::{ProposalPhase, ProposalStatus};
 use crate::util;
 
 // `env.events().publish` is deprecated in soroban-sdk in favour of
@@ -21,16 +22,26 @@ pub fn stake(env: &Env, member: Address, amount: i128) -> Result<(), Error> {
         return Err(Error::InvalidAmount);
     }
 
-    util::token_client(env).transfer(&member, util::contract_address(env), &amount);
-
+    // Commit stake accounting first (CEI); a failed transfer reverts these writes.
     let new_stake = storage::get_stake(env, &member) + amount;
     storage::set_stake(env, &member, new_stake);
     storage::set_total_staked(env, storage::get_total_staked(env) + amount);
-    env.storage().persistent().set(&crate::storage::DataKey::StakeTime(member.clone()), &env.ledger().timestamp());
+    env.storage().persistent().set(
+        &crate::storage::DataKey::StakeTime(member.clone()),
+        &env.ledger().timestamp(),
+    );
     storage::extend_instance(env);
 
-    env.events()
-        .publish((symbol_short!("staked"),), (member, amount, new_stake));
+    // Staking is always denominated in the DAO's configured base token.
+    // Move the principal into the DAO contract after accounting writes; a
+    // failed transfer reverts the whole Soroban transaction.
+    util::token_client(env).transfer(&member, &util::contract_address(env), &amount);
+
+    let voting_weight = util::voting_weight(env, &member);
+    env.events().publish(
+        (symbol_short!("staked"),),
+        (member, amount, new_stake, voting_weight),
+    );
     Ok(())
 }
 
@@ -51,19 +62,77 @@ pub fn unstake(env: &Env, member: Address, amount: i128) -> Result<(), Error> {
         return Err(Error::InsufficientStake);
     }
 
-    let last_stake: u64 = env.storage().persistent().get(&crate::storage::DataKey::StakeTime(member.clone())).unwrap_or(0);
+    let last_stake: u64 = env
+        .storage()
+        .persistent()
+        .get(&crate::storage::DataKey::StakeTime(member.clone()))
+        .unwrap_or(0);
     let policy = storage::get_policy(env);
-    if env.ledger().timestamp() < last_stake + policy.voting_period {
+    if env.ledger().timestamp() < last_stake + policy.cooldown_period {
         return Err(Error::CooldownActive);
+    }
+
+    // Issue #175: disallow unstaking while the member has an active pending
+    // loan proposal still in the voting phase (collateral must remain locked
+    // until the proposal reaches a terminal state).
+    let proposal_count = storage::get_proposal_count(env, storage::DataKey::NextProposalId);
+    for id in 0..proposal_count {
+        if let Some(p) = storage::get_loan_proposal(env, id) {
+            if p.borrower == member
+                && (p.phase == ProposalPhase::Editing || p.phase == ProposalPhase::Voting)
+                && p.status == ProposalStatus::Pending
+                && env.ledger().timestamp() <= p.editing_period_end.saturating_add(p.voting_period)
+            {
+                return Err(Error::HasActiveLoan);
+            }
+        }
+    }
+
+    // A vote cast with stake-derived weight must remain backed until that
+    // proposal closes. This includes loan ballots, treasury ballots, and
+    // unrevealed private commitments, not just the borrower's own request.
+    let treasury_count = storage::get_proposal_count(env, storage::DataKey::NextTreasuryId);
+    for id in 0..treasury_count {
+        if let Some(p) = storage::get_treasury_proposal(env, id) {
+            let voting_end =
+                p.created_at
+                    .saturating_add(
+                        p.voting_period
+                            .saturating_mul(if p.private { 2 } else { 1 }),
+                    );
+            if p.status == ProposalStatus::Pending
+                && env.ledger().timestamp() <= voting_end
+                && (storage::has_treasury_voted(env, id, &member)
+                    || storage::get_commit(env, id, &member).is_some())
+            {
+                return Err(Error::HasActiveLoan);
+            }
+        }
+    }
+    for id in 0..proposal_count {
+        if let Some(p) = storage::get_loan_proposal(env, id) {
+            if p.status == ProposalStatus::Pending
+                && env.ledger().timestamp() <= p.editing_period_end.saturating_add(p.voting_period)
+                && storage::has_loan_voted(env, id, &member)
+            {
+                return Err(Error::HasActiveLoan);
+            }
+        }
     }
 
     let new_stake = current - amount;
     storage::set_stake(env, &member, new_stake);
     storage::set_total_staked(env, storage::get_total_staked(env) - amount);
-    util::token_client(env).transfer(&util::contract_address(env), &member, &amount);
     storage::extend_instance(env);
 
-    env.events()
-        .publish((symbol_short!("unstaked"),), (member, amount, new_stake));
+    // Return staked principal in the same configured base token. Whitelisted
+    // treasury assets never participate in staking.
+    util::token_client(env).transfer(&util::contract_address(env), &member, &amount);
+
+    let voting_weight = util::voting_weight(env, &member);
+    env.events().publish(
+        (symbol_short!("unstaked"),),
+        (member, amount, new_stake, voting_weight),
+    );
     Ok(())
 }

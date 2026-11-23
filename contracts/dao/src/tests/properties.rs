@@ -10,11 +10,11 @@ use crate::{OurDao, OurDaoClient};
 //
 // The example tests in the sibling modules pin down behavior at specific, hand-picked numbers.
 // These instead generate wide ranges of inputs (amounts, treasury sizes,
-// stakes, contributions — including near-`i128::MAX` boundaries) and check
+// stakes, contributions â€” including near-`i128::MAX` boundaries) and check
 // invariants that must hold for *any* input, not just the ones a human
 // happened to write down. `amount` inputs are capped at `AMOUNT_BOUND`
 // (rather than the full `i128` range) specifically to stay clear of the
-// *intermediate* overflow in `amount * BASIS_POINTS` — the invariants below
+// *intermediate* overflow in `amount * BASIS_POINTS` â€” the invariants below
 // are about the post-clamp behavior of these functions, not about auditing
 // every arithmetic op in isolation.
 
@@ -48,7 +48,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(40))]
 
     /// `calculate_loan_terms`'s rate is a linear curve clamped to
-    /// `[min_interest_rate, max_interest_rate]` — no amount or treasury
+    /// `[min_interest_rate, max_interest_rate]` â€” no amount or treasury
     /// size should ever push it outside that band, and the quoted
     /// repayment should never be less than the amount requested.
     #[test]
@@ -69,8 +69,8 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(80))]
 
     /// One base vote plus a square-root boost of up to `MAX_STAKE_BONUS` (5)
-    /// bonus votes — `k` of them cost `STAKE_WEIGHT_UNIT * k^2` staked tokens
-    /// (#182) — so weight is always in `[1, 6]` for any non-negative stake,
+    /// bonus votes â€” `k` of them cost `STAKE_WEIGHT_UNIT * k^2` staked tokens
+    /// (#182) â€” so weight is always in `[1, 6]` for any non-negative stake,
     /// up to and including `i128::MAX`.
     #[test]
     fn voting_weight_stays_in_bounds(stake in 0i128..=i128::MAX) {
@@ -128,7 +128,7 @@ proptest! {
     }
 
     /// Past the last band the boost is pinned at the cap, however much more
-    /// is staked — the whale ceiling.
+    /// is staked â€” the whale ceiling.
     #[test]
     fn boost_saturates_at_the_cap(surplus in 0i128..=AMOUNT_BOUND) {
         let stake = STAKE_WEIGHT_UNIT * MAX_STAKE_BONUS * MAX_STAKE_BONUS + surplus;
@@ -184,8 +184,9 @@ proptest! {
             members.push_back(m);
         }
 
+        let asset = client.get_token();
         env.as_contract(&contract_id, || {
-            crate::loans::distribute_interest(&env, interest);
+            crate::loans::distribute_interest(&env, interest, &asset);
         });
 
         let per_member = interest / active as i128;
@@ -205,7 +206,7 @@ proptest! {
 
     /// `calculate_exit_share` is a pro-rata slice of the treasury.
     /// However a member's `contribution` got to its current value
-    /// (join at the fee, then possibly reduced by default slashing —
+    /// (join at the fee, then possibly reduced by default slashing â€”
     /// see issue's rejoin-after-exit note), each member's share is
     /// bounded by their contribution's fraction of the total, so the
     /// sum across every member can never exceed the treasury itself.
@@ -226,8 +227,13 @@ proptest! {
             client.register_member(&m);
             env.as_contract(&contract_id, || {
                 let mut rec = crate::storage::get_member(&env, &m).unwrap();
+                let delta = c - rec.contribution;
                 rec.contribution = c;
                 crate::storage::set_member(&env, &rec);
+                crate::storage::set_active_contributions(
+                    &env,
+                    crate::storage::get_active_contributions(&env) + delta,
+                );
             });
             members.push_back(m);
         }
@@ -235,5 +241,137 @@ proptest! {
         let treasury = client.get_treasury_balance();
         let sum: i128 = members.iter().map(|m| client.calculate_exit_share(&m)).sum();
         prop_assert!(sum <= treasury);
+    }
+
+    // Issue #507: quote_terms overflow fallbacks never produce wrapped total_repayment or panic
+    #[test]
+    fn quote_terms_overflow_fallbacks_never_panic_or_wrap(
+        amount in prop::strategy::Union::new([
+            (1i128..1_000_000i128).boxed(),
+            (i128::MAX - 1_000_000..=i128::MAX).boxed(),
+        ]),
+        treasury in prop::strategy::Union::new([
+            (0i128..=10i128).boxed(),
+            (AMOUNT_BOUND..=i128::MAX).boxed(),
+        ]),
+    ) {
+        let (_env, client) = contract_with_treasury(treasury.min(AMOUNT_BOUND));
+        let terms = client.calculate_loan_terms(&amount);
+        prop_assert!(terms.total_repayment >= amount);
+    }
+}
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn distribute_interest_preserves_tokens(
+        active in 1u32..=8,
+        interest in 0i128..=AMOUNT_BOUND,
+    ) {
+        let (env, client) = contract_with_treasury(0);
+        let contract_id = client.address.clone();
+
+        let mut members = Vec::new(&env);
+        for _ in 0..active {
+            let member = Address::generate(&env);
+            let mint = token::StellarAssetClient::new(
+                &env,
+                &client.get_token(),
+            );
+            mint.mint(&member, &FEE);
+            client.register_member(&member);
+            members.push_back(member);
+        }
+
+        let asset = client.get_token();
+        env.as_contract(&contract_id, || {
+            crate::loans::distribute_interest(&env, interest, &asset);
+        });
+
+        let per_member = interest / active as i128;
+        let remainder = interest % active as i128;
+        let mut paid = 0i128;
+
+        for member in members.iter() {
+            let pending = client.get_pending_yield(&member);
+            prop_assert_eq!(pending, per_member);
+            paid = paid.checked_add(pending).unwrap_or(paid);
+        }
+
+        prop_assert!(paid <= interest);
+        prop_assert_eq!(interest - paid, remainder);
+
+        let retained = env.as_contract(&contract_id, || {
+            crate::storage::get_yield_remainder(&env, &asset)
+        });
+        prop_assert_eq!(retained, remainder);
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(40))]
+
+    #[test]
+    fn member_counters_match_member_records_across_join_exit_rejoin(
+        joins in prop::collection::vec(
+            prop::bool::ANY,
+            1..=12,
+        ),
+    ) {
+        let s = setup(0);
+
+        for rejoin in joins {
+            let member = Address::generate(&s.env);
+            let mint = token::StellarAssetClient::new(
+                &s.env,
+                &s.client.get_token(),
+            );
+            mint.mint(&member, &MINT);
+
+            s.client.register_member(&member);
+            prop_assert_eq!(s.client.get_active_members(), 1);
+            prop_assert_eq!(s.client.get_total_members(), 1);
+
+            s.client.exit_dao(&member);
+            prop_assert_eq!(s.client.get_active_members(), 0);
+
+            if rejoin {
+                mint.mint(&member, &FEE);
+                s.client.register_member(&member);
+                prop_assert_eq!(s.client.get_active_members(), 1);
+                prop_assert_eq!(s.client.get_total_members(), 1);
+
+                s.env.as_contract(&s.client.address, || {
+                    let record = crate::storage::get_member(&s.env, &member).unwrap();
+                    prop_assert_eq!(record.status, MemberStatus::ActiveMember);
+                });
+            }
+        }
+
+        s.env.as_contract(&s.client.address, || {
+            let addresses = crate::storage::get_members(&s.env);
+            let mut active_count = 0u32;
+            let mut record_count = 0u32;
+
+            for address in addresses.iter() {
+                if let Some(record) =
+                    crate::storage::get_member(&s.env, &address)
+                {
+                    record_count += 1;
+                    if record.status == MemberStatus::ActiveMember {
+                        active_count += 1;
+                    }
+                }
+            }
+
+            prop_assert_eq!(
+                crate::storage::get_total_members(&s.env),
+                record_count
+            );
+            prop_assert_eq!(
+                crate::storage::get_active_members(&s.env),
+                active_count
+            );
+        });
     }
 }

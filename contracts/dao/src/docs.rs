@@ -61,13 +61,18 @@ pub fn attach_document(
             }
         }
     }
-    
+
     storage::set_doc(env, kind, proposal_id, &content_hash);
     env.events()
         .publish((symbol_short!("doc_attn"),), (kind, proposal_id, caller));
     Ok(())
 }
 
-pub fn get_document(env: &Env, kind: ProposalKind, proposal_id: u32) -> Option<Bytes> {
-    storage::get_doc(env, kind, proposal_id)
+pub fn get_document(
+    env: &Env,
+    kind: ProposalKind,
+    proposal_id: u32,
+) -> Result<Option<Bytes>, Error> {
+    util::require_initialized(env)?;
+    Ok(storage::get_doc(env, kind, proposal_id))
 }

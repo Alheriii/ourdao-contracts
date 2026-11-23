@@ -1,6 +1,7 @@
 use soroban_sdk::{symbol_short, Address, Env, String};
 
 use crate::error::Error;
+use crate::privacy;
 use crate::storage;
 use crate::types::{ProposalStatus, TreasuryProposal};
 use crate::util;
@@ -8,11 +9,28 @@ use crate::util;
 // `env.events().publish` is deprecated in soroban-sdk in favour of
 // `#[contractevent]`, but migration is a coordinated, breaking wire-format
 // change (#85).  Suppress per-function so unrelated deprecations still surface.
-#[allow(deprecated)]
 pub fn propose_withdrawal(
     env: &Env,
     proposer: Address,
     amount: i128,
+    destination: Address,
+    reason: String,
+    private: bool,
+) -> Result<u32, Error> {
+    util::require_initialized(env)?;
+    let base = storage::get_token(env);
+    propose_withdrawal_in_asset(env, proposer, amount, base, destination, reason, private)
+}
+
+/// Proposes paying `amount` of `asset` (which must be whitelisted) out of the
+/// treasury. Funds reserved for approved-but-undisbursed loans in the same
+/// asset are not available (#172).
+#[allow(deprecated)]
+pub fn propose_withdrawal_in_asset(
+    env: &Env,
+    proposer: Address,
+    amount: i128,
+    asset: Address,
     destination: Address,
     reason: String,
     private: bool,
@@ -24,11 +42,23 @@ pub fn propose_withdrawal(
     if amount <= 0 {
         return Err(Error::InvalidAmount);
     }
-    if amount > util::treasury_balance(env) {
+    if destination == env.current_contract_address() || reason.is_empty() || reason.len() > 256 {
+        return Err(Error::InvalidProposal);
+    }
+    if storage::get_open_proposals(env, &proposer) >= storage::MAX_OPEN_PROPOSALS_PER_MEMBER {
+        return Err(Error::TooManyOpenProposals);
+    }
+    if !storage::is_token_whitelisted(env, &asset) {
+        return Err(Error::TokenNotWhitelisted);
+    }
+    let available =
+        util::treasury_balance_in_asset(env, &asset) - util::reserved_loan_commitments(env, &asset);
+    if amount > available {
         return Err(Error::InsufficientTreasury);
     }
 
     let id = storage::next_id(env, storage::DataKey::NextTreasuryId);
+    let policy = storage::get_policy(env);
     let proposal = TreasuryProposal {
         id,
         proposer,
@@ -40,12 +70,19 @@ pub fn propose_withdrawal(
         for_votes: 0,
         against_votes: 0,
         votes_cast: 0,
-        voting_period: storage::get_policy(env).voting_period,
-        treasury_threshold: storage::get_policy(env).treasury_threshold,
+        voting_period: policy.voting_period,
+        treasury_threshold: policy.treasury_threshold,
         private,
         active_members: storage::get_active_members(env),
     };
     storage::set_treasury_proposal(env, &proposal);
+    // Only non-base assets are recorded, so base-token proposals keep their
+    // existing storage footprint and events.
+    if asset != storage::get_token(env) {
+        storage::set_treasury_asset(env, id, &asset);
+        env.events()
+            .publish((symbol_short!("tre_asset"),), (id, asset));
+    }
     storage::extend_instance(env);
 
     env.events().publish(
@@ -87,7 +124,12 @@ pub fn tally(
     // long after the intended voting window. Mirror the loan proposal
     // lifecycle: once VOTING_PERIOD has elapsed since creation, persist the
     // Expired status and reject further votes.
-    if env.ledger().timestamp() > proposal.created_at + proposal.voting_period {
+    let voting_end = if proposal.private {
+        privacy::commit_reveal_window(&proposal).1
+    } else {
+        proposal.created_at + proposal.voting_period
+    };
+    if env.ledger().timestamp() > voting_end {
         return Err(Error::NotInVotingPhase);
     }
     if storage::has_treasury_voted(env, proposal.id, voter) {
@@ -114,8 +156,9 @@ pub fn tally(
     // Quorum is fixed against the electorate snapshotted at creation (#73).
     let required = util::required_votes(proposal.active_members, proposal.treasury_threshold);
     if proposal.for_votes >= required {
+        // Persisted once, below: `execute` reads nothing back from storage,
+        // and a failed transfer traps the whole transaction anyway.
         proposal.status = ProposalStatus::ApprovedPendingDisbursement;
-        storage::set_treasury_proposal(env, &proposal);
         if execute(env, &mut proposal).is_err() {
             env.events()
                 .publish((symbol_short!("tre_wait"),), (proposal.id, proposal.amount));
@@ -175,11 +218,14 @@ pub fn execute_approved(env: &Env, proposal_id: u32) -> Result<(), Error> {
 
 #[allow(deprecated)]
 fn execute(env: &Env, proposal: &mut TreasuryProposal) -> Result<(), Error> {
-    if util::treasury_balance(env) < proposal.amount {
+    let asset = storage::get_treasury_asset(env, proposal.id);
+    if util::treasury_balance_in_asset(env, &asset) < proposal.amount {
         return Err(Error::InsufficientTreasury);
     }
     proposal.status = ProposalStatus::Executed;
-    util::token_client(env).transfer(
+    // Commit the effect before interacting with the external asset contract.
+    storage::set_treasury_proposal(env, proposal);
+    util::token_client_for(env, &asset).transfer(
         &util::contract_address(env),
         &proposal.destination,
         &proposal.amount,
@@ -191,21 +237,69 @@ fn execute(env: &Env, proposal: &mut TreasuryProposal) -> Result<(), Error> {
     Ok(())
 }
 
+/// Cancel a treasury proposal during its editing period. Only the original
+/// proposer may cancel, only while the proposal is still Pending and within
+/// the editing window. Emits a dedicated `ProposalCancelled` event so
+/// off-chain indexers can track cancellations cleanly.
+#[allow(deprecated)]
+pub fn cancel_treasury_proposal(
+    env: &Env,
+    proposer: Address,
+    proposal_id: u32,
+) -> Result<(), Error> {
+    util::require_initialized(env)?;
+    util::require_not_paused(env)?;
+    util::require_active_member(env, &proposer)?;
+    let mut proposal =
+        storage::get_treasury_proposal(env, proposal_id).ok_or(Error::TreasuryProposalNotFound)?;
+    if proposal.proposer != proposer {
+        return Err(Error::NotAuthorized);
+    }
+    if proposal.status != ProposalStatus::Pending {
+        return Err(Error::NotInVotingPhase);
+    }
+    let now = env.ledger().timestamp();
+    // Treasury proposals don't carry an explicit editing window; treat the
+    // editing period as the policy's editing_period from creation.
+    let policy = storage::get_policy(env);
+    if now > proposal.created_at + policy.editing_period {
+        return Err(Error::NotInEditingPhase);
+    }
 
+    proposal.status = ProposalStatus::Cancelled;
+    storage::set_treasury_proposal(env, &proposal);
+
+    env.events()
+        .publish((symbol_short!("prop_canc"),), (proposal_id, now));
+    Ok(())
+}
+
+// `env.events().publish` is deprecated in soroban-sdk in favour of
+// `#[contractevent]`, but migration is a coordinated, breaking wire-format
+// change (#85).  Suppress per-function so unrelated deprecations still surface.
+#[allow(deprecated)]
 pub fn expire_treasury_proposal(env: &Env, proposal_id: u32) -> Result<(), Error> {
     util::require_initialized(env)?;
     util::require_not_paused(env)?;
-    let mut proposal = storage::get_treasury_proposal(env, proposal_id)
-        .ok_or(Error::TreasuryProposalNotFound)?;
-    
+    let mut proposal =
+        storage::get_treasury_proposal(env, proposal_id).ok_or(Error::TreasuryProposalNotFound)?;
+
+    // Keep keeper retries idempotent: a proposal already persisted as Expired
+    // is a no-op and must not emit a second event.
+    if proposal.status == ProposalStatus::Expired {
+        return Ok(());
+    }
     if proposal.status != ProposalStatus::Pending {
         return Err(Error::NotInVotingPhase); // Re-using error
     }
-    
+
     if env.ledger().timestamp() > proposal.created_at + proposal.voting_period {
         proposal.status = ProposalStatus::Expired;
         storage::set_treasury_proposal(env, &proposal);
-        // Emitting an event would be nice but not strictly required.
+        env.events().publish(
+            (symbol_short!("tre_exp"),),
+            (proposal_id, proposal.proposer),
+        );
         Ok(())
     } else {
         Err(Error::NotInVotingPhase) // Re-using error

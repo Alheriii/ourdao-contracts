@@ -46,9 +46,9 @@ fn rejected_stake_transfer_leaves_stake_storage_unchanged() {
     assert!(result.is_err());
 
     assert_eq!(s.client.get_stake(&member), 0);
-    let total_staked = s
-        .env
-        .as_contract(&s.client.address, || crate::storage::get_total_staked(&s.env));
+    let total_staked = s.env.as_contract(&s.client.address, || {
+        crate::storage::get_total_staked(&s.env)
+    });
     assert_eq!(total_staked, 0);
     assert_eq!(s.token.balance(&s.client.address), dao_balance_before);
     let has_stake_time = s.env.as_contract(&s.client.address, || {
@@ -61,6 +61,27 @@ fn rejected_stake_transfer_leaves_stake_storage_unchanged() {
         !has_stake_time,
         "stake timestamp must roll back with the rejected transfer"
     );
+}
+
+#[test]
+fn rejected_unstake_transfer_leaves_stake_storage_unchanged() {
+    let s = rejecting_setup(1);
+    let member = s.members.get(0).unwrap();
+
+    // Stake succeeds while transfers are allowed.
+    s.client.stake(&member, &500);
+    assert_eq!(s.client.get_stake(&member), 500);
+
+    // Reject the payout leg: counters must stay in sync with the vault.
+    s.token.set_reject_transfers(&true);
+    let result = s.client.try_unstake(&member, &500);
+    assert!(result.is_err());
+
+    assert_eq!(s.client.get_stake(&member), 500);
+    let total_staked = s.env.as_contract(&s.client.address, || {
+        crate::storage::get_total_staked(&s.env)
+    });
+    assert_eq!(total_staked, 500);
 }
 
 // Issue #193: StakingRewardClaimed event on yield distribution
@@ -121,7 +142,10 @@ fn claim_rewards_emits_staking_reward_claimed_event_and_updates_snapshot() {
 
     // Verify accumulator snapshot updated on member record
     assert_eq!(s.client.get_pending_yield(&v1), 0);
-    assert_eq!(s.client.try_claim_rewards(&v1), Err(Ok(Error::NothingToClaim)));
+    assert_eq!(
+        s.client.try_claim_rewards(&v1),
+        Err(Ok(Error::NothingToClaim))
+    );
 }
 
 // ===========================================================================
@@ -213,6 +237,58 @@ fn quadrupling_stake_doubles_the_boost() {
             k * 2
         );
     }
+}
+
+// ==================== issue #303: boundary tests for staking curve ====================
+#[test]
+fn staking_curve_boundary_tests() {
+    // Test boundary at 5 bonus votes (MAX_STAKE_BONUS).
+    // Formula: k bonus votes cost k^2 * STAKE_WEIGHT_UNIT tokens.
+    // At k=5: need 5^2 * 100 = 2500 tokens for exactly 5 bonus votes.
+    let at_5_bonus = STAKE_WEIGHT_UNIT * 5 * 5; // 2500
+    assert_eq!(stake_boost(at_5_bonus), 5);
+
+    // Just below 5 bonus votes: at 2499 tokens, should get 4 bonus votes.
+    let below_5_bonus = at_5_bonus - 1;
+    assert_eq!(stake_boost(below_5_bonus), 4);
+
+    // Above the 5-bonus cap: at 6^2 * 100 = 3600 tokens, should still be capped at 5.
+    let above_5_bonus = STAKE_WEIGHT_UNIT * 6 * 6; // 3600
+    assert_eq!(stake_boost(above_5_bonus), 5);
+
+    // Even at much higher stakes, the boost is capped at MAX_STAKE_BONUS (5).
+    assert_eq!(stake_boost(STAKE_WEIGHT_UNIT * 10 * 10), 5);
+    assert_eq!(stake_boost(STAKE_WEIGHT_UNIT * 100 * 100), 5);
+}
+
+#[test]
+fn staking_curve_boundary_voting_weight() {
+    let s = setup(2);
+    let staker = s.members.get(0).unwrap();
+    let borrower = s.members.get(1).unwrap();
+
+    // Stake at the 5-bonus boundary: 2500 tokens = 5 bonus votes + 1 base = 6 voting weight.
+    let at_5_bonus = STAKE_WEIGHT_UNIT * 5 * 5; // 2500
+    s.client.stake(&staker, &at_5_bonus);
+
+    let pid = s.client.request_loan(&borrower, &500, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&staker, &pid, &true);
+
+    let prop = s.client.get_loan_proposal(&pid).unwrap();
+    assert_eq!(prop.for_votes, 6); // 1 base + 5 bonus
+
+    // Stake above the cap: 3600 tokens should still give only 5 bonus votes = 6 voting weight.
+    s.client.unstake(&staker, &at_5_bonus);
+    let above_5_bonus = STAKE_WEIGHT_UNIT * 6 * 6; // 3600
+    s.client.stake(&staker, &above_5_bonus);
+
+    let pid2 = s.client.request_loan(&borrower, &500, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&staker, &pid2, &true);
+
+    let prop2 = s.client.get_loan_proposal(&pid2).unwrap();
+    assert_eq!(prop2.for_votes, 6); // Still capped at 1 base + 5 bonus
 }
 
 #[test]
@@ -399,6 +475,164 @@ fn voting_weight_at_exact_cap() {
 #[test]
 fn stake_threshold_constants_are_discoverable() {
     let s = setup(1);
-    assert_eq!(s.client.get_stake_weight_unit(), crate::util::STAKE_WEIGHT_UNIT);
+    assert_eq!(
+        s.client.get_stake_weight_unit(),
+        crate::util::STAKE_WEIGHT_UNIT
+    );
     assert_eq!(s.client.get_max_stake_bonus(), crate::util::MAX_STAKE_BONUS);
+}
+
+// ===========================================================================
+// Issue #175: Prevent unstaking while member has an active pending proposal
+// ===========================================================================
+
+#[test]
+fn unstake_rejected_while_proposal_in_voting() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+
+    s.client.stake(&borrower, &200);
+    let pid = s.client.request_loan(&borrower, &500, &None);
+
+    advance(&s.env, EDITING + 1);
+    let prop = s.client.get_loan_proposal(&pid).unwrap();
+    assert_eq!(prop.phase, crate::types::ProposalPhase::Voting);
+
+    let res = s.client.try_unstake(&borrower, &200);
+    assert_eq!(
+        res,
+        Err(Ok(crate::Error::HasActiveLoan)),
+        "should not be able to unstake with an active pending proposal"
+    );
+}
+
+#[test]
+fn unstake_rejected_while_proposal_in_editing() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+
+    s.client.stake(&borrower, &200);
+    let _pid = s.client.request_loan(&borrower, &500, &None);
+
+    let res = s.client.try_unstake(&borrower, &200);
+    assert_eq!(
+        res,
+        Err(Ok(crate::Error::HasActiveLoan)),
+        "should not be able to unstake with a proposal in editing phase"
+    );
+}
+
+#[test]
+fn unstake_allowed_after_proposal_approved() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let v1 = s.members.get(1).unwrap();
+    let v2 = s.members.get(2).unwrap();
+
+    s.client.stake(&borrower, &200);
+    let pid = s.client.request_loan(&borrower, &500, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&v1, &pid, &true);
+    s.client.vote_on_loan_proposal(&v2, &pid, &true);
+
+    let prop = s.client.get_loan_proposal(&pid).unwrap();
+    assert_eq!(prop.status, ProposalStatus::Approved);
+
+    // Advance past the stake cooldown (voting_period).
+    advance(&s.env, VOTING_PERIOD + 1);
+
+    s.client.unstake(&borrower, &200);
+    assert_eq!(s.client.get_stake(&borrower), 0);
+}
+
+#[test]
+fn unstake_allowed_after_proposal_expired() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+
+    s.client.stake(&borrower, &200);
+    let _pid = s.client.request_loan(&borrower, &500, &None);
+
+    // Advance well past the voting deadline so the proposal expires.
+    advance(&s.env, EDITING + VOTING_PERIOD + 1);
+
+    s.client.unstake(&borrower, &200);
+    assert_eq!(s.client.get_stake(&borrower), 0);
+}
+
+#[test]
+fn unstaking_during_open_loan_ballot_is_rejected() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let voter = s.members.get(1).unwrap();
+    s.client.stake(&voter, &200);
+    let pid = s.client.request_loan(&borrower, &500, &None);
+    advance(&s.env, EDITING + 1);
+    s.client.vote_on_loan_proposal(&voter, &pid, &false);
+    advance(&s.env, VOTING_PERIOD / 2);
+    assert_eq!(
+        s.client.try_unstake(&voter, &200),
+        Err(Ok(Error::HasActiveLoan))
+    );
+}
+
+#[test]
+fn unstaking_during_open_treasury_ballot_is_rejected() {
+    let s = setup(4);
+    let proposer = s.members.get(0).unwrap();
+    let voter = s.members.get(1).unwrap();
+    s.client.stake(&voter, &200);
+    let pid = s.client.propose_treasury_withdrawal(
+        &proposer,
+        &100,
+        &Address::generate(&s.env),
+        &soroban_sdk::String::from_str(&s.env, "vote"),
+        &false,
+    );
+    s.client.vote_on_treasury_proposal(&voter, &pid, &false);
+    advance(&s.env, VOTING_PERIOD / 2);
+    assert_eq!(
+        s.client.try_unstake(&voter, &200),
+        Err(Ok(Error::HasActiveLoan))
+    );
+}
+
+#[test]
+fn unstaking_during_unrevealed_private_commitment_is_rejected() {
+    let s = setup(3);
+    let proposer = s.members.get(0).unwrap();
+    let voter = s.members.get(1).unwrap();
+    s.client.stake(&voter, &200);
+    let pid = s.client.propose_treasury_withdrawal(
+        &proposer,
+        &100,
+        &Address::generate(&s.env),
+        &soroban_sdk::String::from_str(&s.env, "private"),
+        &true,
+    );
+    let salt = soroban_sdk::BytesN::from_array(&s.env, &[1u8; 32]);
+    let hash = crate::privacy::compute_commitment(&s.env, &voter, pid, true, &salt);
+    s.client.commit_treasury_vote(&voter, &pid, &hash);
+    advance(&s.env, VOTING_PERIOD / 2);
+    assert_eq!(
+        s.client.try_unstake(&voter, &200),
+        Err(Ok(Error::HasActiveLoan))
+    );
+}
+
+
+// Issue #280: staking always transfers the configured base token.
+#[test]
+fn staking_ignores_whitelisted_non_base_assets() {
+    let s = setup(1);
+    let member = s.members.get(0).unwrap();
+    let second = whitelist_second_asset(&s, 0);
+    mint_asset(&s, &second.address, &member, 10_000);
+
+    let base_before = s.token.balance(&member);
+    let second_before = second.balance(&member);
+    s.client.stake(&member, &400);
+
+    assert_eq!(s.token.balance(&member), base_before - 400);
+    assert_eq!(second.balance(&member), second_before);
 }
