@@ -310,6 +310,9 @@ fn approve_and_disburse(env: &Env, proposal: &LoanProposal) -> Result<(), Error>
     
     // Issue 61: re-quote at disbursement so rate reflects current treasury balance
     let terms = calculate_loan_terms(env, proposal.amount);
+    // #70: the default terms are fixed here too, alongside the rate, so a
+    // later `set_loan_policy` cannot change what this borrower loses on default.
+    let policy = storage::get_policy(env);
 
     let now = env.ledger().timestamp();
     // Reuse the proposal's own id rather than a separate counter: a proposal
@@ -328,6 +331,8 @@ fn approve_and_disburse(env: &Env, proposal: &LoanProposal) -> Result<(), Error>
         due_time: now + terms.duration,
         status: LoanStatus::Active,
         amount_repaid: 0,
+        default_grace_period: policy.default_grace_period,
+        default_penalty_bps: policy.default_penalty_bps,
     };
     storage::set_loan(env, &loan);
 
@@ -470,17 +475,25 @@ pub fn expire_loan_proposal(env: &Env, proposal_id: u32) -> Result<(), Error> {
 }
 
 /// Marks an overdue loan as defaulted. Permissionless and callable by anyone
-/// once `due_time + policy.default_grace_period` has passed — this is an
+/// once `due_time + loan.default_grace_period` has passed — this is an
 /// objective, time-based state transition (a keeper call), not an admin
 /// action, so there's nothing to authorize.
 ///
 /// Consequence: the borrower's `contribution` (their pro-rata claim on the
-/// treasury via `calculate_exit_share`) is slashed by `default_penalty_bps`,
+/// treasury via `calculate_exit_share`) is slashed by `loan.default_penalty_bps`,
 /// and `has_active_loan` is cleared. Clearing the flag is deliberate: it lets
 /// a defaulted borrower still exit the DAO with their reduced share rather
 /// than being trapped (exit is blocked while `has_active_loan` is true), and
 /// lets them request a new loan again after the normal cooldown. Like
 /// `Repaid`, `Defaulted` is terminal — a defaulted loan can't later be repaid.
+///
+/// Both default terms come from the loan itself, snapshotted from the policy
+/// at disbursement, never from the current policy (#70): a borrower who took a
+/// loan under a 5% penalty can't be slashed at 50% by a later admin change.
+/// There is no fallback to the live policy because there is nothing to fall
+/// back for — the contract has no in-place upgrade path, so every `Loan` this
+/// code can read was written by this code. See `docs/MIGRATION.md` for loans
+/// carried over from an older deployment.
 #[allow(deprecated)]
 pub fn mark_loan_defaulted(env: &Env, loan_id: u32) -> Result<(), Error> {
     util::require_initialized(env)?;
@@ -490,9 +503,8 @@ pub fn mark_loan_defaulted(env: &Env, loan_id: u32) -> Result<(), Error> {
         return Err(Error::LoanNotActive);
     }
 
-    let policy = storage::get_policy(env);
     let now = env.ledger().timestamp();
-    if now < loan.due_time + policy.default_grace_period {
+    if now < loan.due_time + loan.default_grace_period {
         return Err(Error::LoanNotOverdue);
     }
 
@@ -501,7 +513,7 @@ pub fn mark_loan_defaulted(env: &Env, loan_id: u32) -> Result<(), Error> {
 
     let mut penalty: i128 = 0;
     if let Some(mut member) = storage::get_member(env, &loan.borrower) {
-        penalty = (member.contribution * policy.default_penalty_bps as i128 / BASIS_POINTS)
+        penalty = (member.contribution * loan.default_penalty_bps as i128 / BASIS_POINTS)
             .min(member.contribution);
         member.contribution -= penalty;
         member.has_active_loan = false;

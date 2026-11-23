@@ -110,6 +110,13 @@ pub struct Loan {
     pub due_time: u64,
     pub status: LoanStatus,
     pub amount_repaid: i128,
+    /// `LoanPolicy.default_grace_period` in force when this loan was
+    /// disbursed. Default terms are part of the obligation the borrower
+    /// accepted, so a later policy change must not alter them (#70).
+    pub default_grace_period: u64,
+    /// `LoanPolicy.default_penalty_bps` in force when this loan was disbursed.
+    /// See `default_grace_period`.
+    pub default_penalty_bps: u32,
 }
 
 #[contracttype]

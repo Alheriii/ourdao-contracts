@@ -730,3 +730,85 @@ fn non_member_can_disburse_approved_loan_without_auth() {
     );
     assert_eq!(s.token.balance(&borrower), borrower_bal + 1_500);
 }
+
+// ── #70: default terms are fixed at disbursement ─────────────────────────────
+
+/// Requests and approves a 500-unit loan from member 0 with members 1 and 2.
+fn disbursed_loan(s: &Setup) -> u32 {
+    let borrower = s.members.get(0).unwrap();
+    let pid = s.client.request_loan(&borrower, &500, &None);
+    advance(&s.env, EDITING + 1);
+    s.client
+        .vote_on_loan_proposal(&s.members.get(1).unwrap(), &pid, &true);
+    s.client
+        .vote_on_loan_proposal(&s.members.get(2).unwrap(), &pid, &true);
+    pid
+}
+
+fn apply_policy(s: &Setup, policy: &crate::types::LoanPolicy) {
+    s.client.propose_policy_update(&s.admin, policy);
+    advance(&s.env, TIMELOCK_DURATION + 1);
+    s.client.execute_policy_update(&s.admin);
+}
+
+#[test]
+fn loan_snapshots_default_terms_at_disbursement() {
+    let s = setup(3);
+    let id = disbursed_loan(&s);
+    let loan = s.client.get_loan(&id).unwrap();
+    assert_eq!(loan.default_grace_period, 0);
+    assert_eq!(loan.default_penalty_bps, 2_000);
+}
+
+#[test]
+fn raising_penalty_and_grace_after_disbursement_does_not_change_default_terms() {
+    let s = setup(3);
+    let borrower = s.members.get(0).unwrap();
+    let id = disbursed_loan(&s); // disbursed under 20% penalty, 0 grace
+
+    let mut harsher = policy();
+    harsher.default_penalty_bps = 5_000; // 50%
+    harsher.default_grace_period = 10 * 24 * 60 * 60;
+    apply_policy(&s, &harsher);
+    assert_eq!(s.client.get_loan_policy().default_penalty_bps, 5_000);
+
+    // Past due under the loan's own 0-second grace period; the new policy's
+    // 10-day grace would still say "not overdue".
+    advance(&s.env, LOAN_DURATION);
+    let contribution_before = s.client.get_member(&borrower).unwrap().contribution;
+    s.client.mark_loan_defaulted(&id);
+
+    // Slashed at the original 20%, not the new 50%.
+    let member = s.client.get_member(&borrower).unwrap();
+    assert_eq!(
+        member.contribution,
+        contribution_before - contribution_before * 2_000 / 10_000
+    );
+    assert_eq!(s.client.get_loan(&id).unwrap().default_penalty_bps, 2_000);
+}
+
+#[test]
+fn shortening_grace_after_disbursement_does_not_accelerate_default() {
+    let s = setup(3);
+    let mut lenient = policy();
+    lenient.default_grace_period = 10 * 24 * 60 * 60;
+    apply_policy(&s, &lenient);
+
+    let id = disbursed_loan(&s); // disbursed with a 10-day grace period
+    apply_policy(&s, &policy()); // grace cut back to 0
+
+    let loan = s.client.get_loan(&id).unwrap();
+    s.env
+        .ledger()
+        .with_mut(|li| li.timestamp = loan.due_time + 1);
+    assert_eq!(
+        s.client.try_mark_loan_defaulted(&id),
+        Err(Ok(Error::LoanNotOverdue))
+    );
+
+    s.env
+        .ledger()
+        .with_mut(|li| li.timestamp = loan.due_time + 10 * 24 * 60 * 60);
+    s.client.mark_loan_defaulted(&id);
+    assert_eq!(s.client.get_loan(&id).unwrap().status, LoanStatus::Defaulted);
+}
