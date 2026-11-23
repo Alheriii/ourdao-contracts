@@ -73,6 +73,7 @@ pub fn propose_withdrawal_in_asset(
         voting_period: policy.voting_period,
         treasury_threshold: policy.treasury_threshold,
         private,
+        active_members: storage::get_active_members(env),
     };
     storage::set_treasury_proposal(env, &proposal);
     // Only non-base assets are recorded, so base-token proposals keep their
@@ -134,6 +135,10 @@ pub fn tally(
     if storage::has_treasury_voted(env, proposal.id, voter) {
         return Err(Error::AlreadyVoted);
     }
+    // Callers have already checked `voter` is an active member; this adds the
+    // electorate rule for both open votes and commit-reveal reveals (#73).
+    let member = storage::get_member(env, voter).ok_or(Error::NotMember)?;
+    util::require_in_electorate(&member, proposal.created_at)?;
 
     let weight = util::voting_weight(env, voter);
     if support {
@@ -148,8 +153,8 @@ pub fn tally(
         (proposal.id, voter.clone(), support),
     );
 
-    let active_members = storage::get_active_members(env);
-    let required = util::required_votes(active_members, proposal.treasury_threshold);
+    // Quorum is fixed against the electorate snapshotted at creation (#73).
+    let required = util::required_votes(proposal.active_members, proposal.treasury_threshold);
     if proposal.for_votes >= required {
         // Persisted once, below: `execute` reads nothing back from storage,
         // and a failed transfer traps the whole transaction anyway.
@@ -159,7 +164,7 @@ pub fn tally(
                 .publish((symbol_short!("tre_wait"),), (proposal.id, proposal.amount));
         }
     } else {
-        let remaining = active_members.saturating_sub(proposal.votes_cast);
+        let remaining = proposal.active_members.saturating_sub(proposal.votes_cast);
         let max_remaining = remaining as i128 * (1 + util::MAX_STAKE_BONUS);
         if proposal.for_votes + max_remaining < required {
             proposal.status = ProposalStatus::Rejected;
@@ -173,6 +178,31 @@ pub fn tally(
     Ok(())
 }
 
+/// Executes a treasury withdrawal whose proposal already passed its vote but
+/// could not be paid out at the time because the treasury was short (status
+/// `ApprovedPendingDisbursement`, see `tre_wait`). Exposed as
+/// `execute_treasury_proposal`. Permissionless and callable by anyone, member
+/// or not — a keeper call, like `loans::mark_loan_defaulted`, not a
+/// privileged action, so there's nothing to authorize.
+///
+/// Why no auth is needed: the members already approved this exact transfer.
+/// The `amount` and `destination` are fixed on the stored proposal, which the
+/// vote approved as-is. The caller passes only `proposal_id` and cannot
+/// change who is paid or how much.
+///
+/// What the caller can influence: only *when* the transfer happens, and only
+/// once the treasury can cover it. The caller pays the transaction fee and
+/// receives nothing, so there is no incentive to grief.
+///
+/// Failure mode: if the treasury still can't cover the amount this returns
+/// `InsufficientTreasury` and nothing changes. Repeated calls are safe — once
+/// executed, the status is `Executed` and the status guard below rejects every
+/// further call, so a withdrawal can never be paid twice.
+///
+/// Do not add a `require_auth` here: requiring an admin or the proposer would
+/// let a single absent party block an outcome the DAO already voted for. The
+/// `non_member_can_execute_approved_treasury_proposal_without_auth` test pins
+/// this.
 pub fn execute_approved(env: &Env, proposal_id: u32) -> Result<(), Error> {
     util::require_initialized(env)?;
     util::require_not_paused(env)?;

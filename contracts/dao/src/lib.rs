@@ -206,6 +206,8 @@ impl OurDao {
         loans::vote_batch(&env, voter, votes)
     }
 
+    /// Pays out an approved loan that was waiting on treasury funds.
+    /// Permissionless keeper call — see `loans::disburse_approved_loan`.
     pub fn disburse_approved_loan(env: Env, proposal_id: u32) -> Result<(), Error> {
         loans::disburse_approved_loan(&env, proposal_id)
     }
@@ -306,6 +308,8 @@ impl OurDao {
         treasury::expire_treasury_proposal(&env, proposal_id)
     }
 
+    /// Executes an approved treasury withdrawal that was waiting on treasury
+    /// funds. Permissionless keeper call — see `treasury::execute_approved`.
     pub fn execute_treasury_proposal(env: Env, proposal_id: u32) -> Result<(), Error> {
         treasury::execute_approved(&env, proposal_id)
     }
@@ -666,6 +670,11 @@ impl OurDao {
         }
     }
 
+    /// Quotes the terms a loan of `amount` would carry right now. The quote
+    /// can only be honoured when `amount <= max_loan`: with an empty or
+    /// negative treasury `max_loan` is 0 and the rate shown is the policy
+    /// maximum for a loan that cannot be issued. See
+    /// `loans::calculate_loan_terms`.
     pub fn calculate_loan_terms(env: Env, amount: i128) -> Result<LoanTerms, Error> {
         util::require_initialized(&env)?;
         Ok(loans::calculate_loan_terms(&env, amount))

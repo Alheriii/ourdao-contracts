@@ -3,13 +3,32 @@ use soroban_sdk::{symbol_short, Address, Env, String, Vec};
 use crate::error::Error;
 use crate::storage;
 use crate::types::{
-    Loan, LoanProposal, LoanStatus, LoanTerms, MemberStatus, ProposalPhase,
+    Loan, LoanPolicy, LoanProposal, LoanStatus, LoanTerms, MemberStatus, ProposalPhase,
     ProposalStatus, BASIS_POINTS,
 };
 use crate::util;
 
+/// Largest principal the treasury-ratio cap allows against `treasury`. Never
+/// negative: `treasury_balance` subtracts total staked and can legitimately go
+/// below zero, and an empty or negative treasury can fund nothing (#80).
+/// Floor division rounds down to favour the treasury.
+pub fn max_loan_for(policy: &LoanPolicy, treasury: i128) -> i128 {
+    if treasury <= 0 {
+        return 0;
+    }
+    treasury
+        .checked_mul(policy.max_loan_to_treasury_ratio as i128)
+        .and_then(|v| v.checked_div(BASIS_POINTS))
+        .unwrap_or(0)
+}
+
 /// Quote the terms a loan of `amount` would carry right now. Interest scales
 /// linearly with the loan's size relative to the treasury, clamped to policy.
+///
+/// This always returns a rate, even for a loan that cannot be issued: when
+/// the treasury is empty or negative the rate is the policy maximum, and an
+/// amount above the treasury-ratio cap gets a rate too. Check
+/// `amount <= terms.max_loan` before showing a quote as available (#80).
 pub fn calculate_loan_terms(env: &Env, amount: i128) -> LoanTerms {
     quote_terms(env, amount, util::treasury_balance(env))
 }
@@ -54,6 +73,7 @@ fn quote_terms(env: &Env, amount: i128, treasury: i128) -> LoanTerms {
         interest_rate: rate as u32,
         total_repayment,
         duration: policy.max_loan_duration,
+        max_loan: max_loan_for(&policy, treasury),
     }
 }
 
@@ -127,11 +147,8 @@ pub fn request_loan_in_asset(
 
     let policy = storage::get_policy(env);
     let treasury = util::treasury_balance_in_asset(env, &asset);
-    // Treasury exposure limit: floor-division rounds down to favour the treasury.
-    let max_loan = treasury
-        .checked_mul(policy.max_loan_to_treasury_ratio as i128)
-        .and_then(|v| v.checked_div(BASIS_POINTS))
-        .unwrap_or(0);
+    // Same cap the quote reports as `max_loan` (#80).
+    let max_loan = max_loan_for(&policy, treasury);
     if amount > max_loan {
         return Err(Error::ExceedsTreasuryRatio);
     }
@@ -156,6 +173,7 @@ pub fn request_loan_in_asset(
         voting_period: policy.voting_period,
         metadata_cid,
         last_edited_at: None,
+        active_members: storage::get_active_members(env),
     };
     storage::set_loan_proposal(env, &proposal);
     // Only non-base assets are recorded, so base-token loans keep their
@@ -330,6 +348,10 @@ fn vote_on_loan_proposal_internal(
     if storage::has_loan_voted(env, proposal_id, voter) {
         return Err(Error::AlreadyVoted);
     }
+    // Callers have already checked `voter` is an active member; this adds the
+    // electorate rule for single and batch votes alike (#73).
+    let member = storage::get_member(env, voter).ok_or(Error::NotMember)?;
+    util::require_in_electorate(&member, proposal.created_at)?;
 
     let weight = util::voting_weight(env, voter);
     if support {
@@ -351,8 +373,8 @@ fn vote_on_loan_proposal_internal(
     } else {
         storage::get_threshold(env)
     };
-    let active_members = storage::get_active_members(env);
-    let required = util::required_votes(active_members, threshold);
+    // Quorum is fixed against the electorate snapshotted at creation (#73).
+    let required = util::required_votes(proposal.active_members, threshold);
     if proposal.for_votes >= required && proposal.status == ProposalStatus::Pending {
         proposal.status = ProposalStatus::ApprovedPendingDisbursement;
         proposal.phase = ProposalPhase::Executed;
@@ -366,7 +388,7 @@ fn vote_on_loan_proposal_internal(
             );
         }
     } else if proposal.status == ProposalStatus::Pending {
-        let remaining = active_members.saturating_sub(proposal.votes_cast);
+        let remaining = proposal.active_members.saturating_sub(proposal.votes_cast);
         let max_remaining = remaining as i128 * (1 + util::MAX_STAKE_BONUS);
         if proposal.for_votes + max_remaining < required {
             proposal.status = ProposalStatus::Rejected;
@@ -381,6 +403,32 @@ fn vote_on_loan_proposal_internal(
     Ok(())
 }
 
+/// Disburses a loan whose proposal already passed its vote but could not be
+/// paid out at the time because the treasury was short (status
+/// `ApprovedPendingDisbursement`, see `loan_wait`). Permissionless and
+/// callable by anyone, member or not — this is a keeper call, like
+/// [`mark_loan_defaulted`], not a privileged action, so there's nothing to
+/// authorize.
+///
+/// Why no auth is needed: the decision was already made by the members'
+/// vote. The borrower and principal are fixed on the stored proposal, and the
+/// terms are computed on-chain from the current policy and treasury. The
+/// caller passes only `proposal_id` and cannot redirect funds, change the
+/// amount, or pick the terms.
+///
+/// What the caller can influence: only *when* disbursement happens, and only
+/// once the treasury can cover it. The caller pays the transaction fee and
+/// receives nothing, so there is no incentive to grief; at worst an outsider
+/// does the borrower a favour by paying out early.
+///
+/// Failure mode: if the treasury still can't cover the principal this returns
+/// `InsufficientTreasury` and nothing changes. Repeated calls are safe — once
+/// disbursed, the status is `Approved` and the status guard below rejects
+/// every further call, so a loan can never be paid out twice.
+///
+/// Do not add a `require_auth` here: requiring an admin or the borrower would
+/// let a single absent party block an outcome the DAO already voted for. The
+/// `non_member_can_disburse_approved_loan_without_auth` test pins this.
 pub fn disburse_approved_loan(env: &Env, proposal_id: u32) -> Result<(), Error> {
     util::require_initialized(env)?;
     util::require_not_paused(env)?;
@@ -434,6 +482,8 @@ fn approve_and_disburse(env: &Env, proposal: &LoanProposal) -> Result<(), Error>
         due_time: now + terms.duration,
         status: LoanStatus::Active,
         amount_repaid: 0,
+        default_grace_period: policy.default_grace_period,
+        default_penalty_bps: policy.default_penalty_bps,
     };
     storage::set_loan(env, &loan);
     storage::adjust_outstanding_principal(env, &asset, principal_outstanding(&loan));
@@ -657,17 +707,25 @@ pub fn expire_loan_proposal(env: &Env, proposal_id: u32) -> Result<(), Error> {
 }
 
 /// Marks an overdue loan as defaulted. Permissionless and callable by anyone
-/// once `due_time + policy.default_grace_period` has passed — this is an
+/// once `due_time + loan.default_grace_period` has passed — this is an
 /// objective, time-based state transition (a keeper call), not an admin
 /// action, so there's nothing to authorize.
 ///
 /// Consequence: the borrower's `contribution` (their pro-rata claim on the
-/// treasury via `calculate_exit_share`) is slashed by `default_penalty_bps`,
+/// treasury via `calculate_exit_share`) is slashed by `loan.default_penalty_bps`,
 /// and `has_active_loan` is cleared. Clearing the flag is deliberate: it lets
 /// a defaulted borrower still exit the DAO with their reduced share rather
 /// than being trapped (exit is blocked while `has_active_loan` is true), and
 /// lets them request a new loan again after the normal cooldown. Like
 /// `Repaid`, `Defaulted` is terminal — a defaulted loan can't later be repaid.
+///
+/// Both default terms come from the loan itself, snapshotted from the policy
+/// at disbursement, never from the current policy (#70): a borrower who took a
+/// loan under a 5% penalty can't be slashed at 50% by a later admin change.
+/// There is no fallback to the live policy because there is nothing to fall
+/// back for — the contract has no in-place upgrade path, so every `Loan` this
+/// code can read was written by this code. See `docs/MIGRATION.md` for loans
+/// carried over from an older deployment.
 #[allow(deprecated)]
 pub fn mark_loan_defaulted(env: &Env, loan_id: u32) -> Result<(), Error> {
     util::require_initialized(env)?;
@@ -677,9 +735,8 @@ pub fn mark_loan_defaulted(env: &Env, loan_id: u32) -> Result<(), Error> {
         return Err(Error::LoanNotActive);
     }
 
-    let policy = storage::get_policy(env);
     let now = env.ledger().timestamp();
-    if now < loan.due_time + policy.default_grace_period {
+    if now < loan.due_time + loan.default_grace_period {
         return Err(Error::LoanNotOverdue);
     }
 
@@ -696,10 +753,10 @@ pub fn mark_loan_defaulted(env: &Env, loan_id: u32) -> Result<(), Error> {
     let mut penalty: i128 = 0;
     if let Some(mut member) = storage::get_member(env, &loan.borrower) {
         // Default slashing penalty (member debt to treasury): ceil-division rounds up to favour the treasury.
-        penalty = if member.contribution > 0 && policy.default_penalty_bps > 0 {
+        penalty = if member.contribution > 0 && loan.default_penalty_bps > 0 {
             member
                 .contribution
-                .checked_mul(policy.default_penalty_bps as i128)
+                .checked_mul(loan.default_penalty_bps as i128)
                 .and_then(|v| v.checked_add(BASIS_POINTS - 1))
                 .and_then(|v| v.checked_div(BASIS_POINTS))
                 .unwrap_or(member.contribution)

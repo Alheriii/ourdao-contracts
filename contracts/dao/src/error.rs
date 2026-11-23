@@ -98,4 +98,7 @@ pub enum Error {
     BorrowerCannotVote = 91,
     /// A whitelisted token with treasury funds cannot be removed (#272).
     TokenHasBalance = 92,
+    /// The voter joined (or rejoined) the DAO after the proposal was created,
+    /// so they are outside the electorate its quorum was fixed against (#73).
+    JoinedAfterProposal = 93,
 }

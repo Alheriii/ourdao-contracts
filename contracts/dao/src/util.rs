@@ -193,6 +193,22 @@ pub fn ceil_div_nonnegative(value: i128, divisor: i128) -> i128 {
     value / divisor + i128::from(value % divisor != 0)
 }
 
+/// A proposal's electorate is the set of members active when it was created;
+/// its quorum is computed from that count (#73). A member who joined, or
+/// rejoined after exiting, after `proposal_created_at` was not part of that
+/// count, so letting them vote would add votes against a bar that never
+/// included them. They may vote on proposals created after they joined.
+///
+/// Membership is tracked by ledger timestamp, so a member who joins in the
+/// same ledger a proposal is created in counts as part of its electorate.
+pub fn require_in_electorate(member: &Member, proposal_created_at: u64) -> Result<(), Error> {
+    if member.join_time > proposal_created_at {
+        Err(Error::JoinedAfterProposal)
+    } else {
+        Ok(())
+    }
+}
+
 /// Ceil-division consensus bar over the active-member base, in basis points:
 /// `(base * threshold + BP - 1) / BP`.
 pub fn required_votes(active_members: u32, threshold_bps: u32) -> i128 {

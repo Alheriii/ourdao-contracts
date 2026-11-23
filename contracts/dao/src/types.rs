@@ -142,6 +142,10 @@ pub struct LoanProposal {
     pub metadata_cid: Option<String>,
     /// Timestamp of the last `edit_loan_proposal` call (`None` if never edited).
     pub last_edited_at: Option<u64>,
+    /// Active-member count when the proposal was created. Quorum and the
+    /// early-rejection bound are computed from this, not the live count, so
+    /// membership churn during the vote cannot move the bar (#73).
+    pub active_members: u32,
 }
 
 #[contracttype]
@@ -156,6 +160,13 @@ pub struct Loan {
     pub due_time: u64,
     pub status: LoanStatus,
     pub amount_repaid: i128,
+    /// `LoanPolicy.default_grace_period` in force when this loan was
+    /// disbursed. Default terms are part of the obligation the borrower
+    /// accepted, so a later policy change must not alter them (#70).
+    pub default_grace_period: u64,
+    /// `LoanPolicy.default_penalty_bps` in force when this loan was disbursed.
+    /// See `default_grace_period`.
+    pub default_penalty_bps: u32,
 }
 
 #[contracttype]
@@ -175,6 +186,9 @@ pub struct TreasuryProposal {
     pub treasury_threshold: u32,
     /// When true, votes must be committed then revealed (commit-reveal privacy).
     pub private: bool,
+    /// Active-member count when the proposal was created. See
+    /// `LoanProposal.active_members` (#73).
+    pub active_members: u32,
 }
 
 /// Spendable treasury balance in one whitelisted asset (#339).
@@ -218,12 +232,21 @@ pub struct TreasuryAccounting {
 }
 
 /// Computed loan terms returned by the read-only quote helper.
+///
+/// A quote is only honourable when `amount <= max_loan`. Above that,
+/// `request_loan` rejects the amount with `ExceedsTreasuryRatio`, and the
+/// rate shown is not one anyone can borrow at (#80).
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoanTerms {
     pub interest_rate: u32,
     pub total_repayment: i128,
     pub duration: u64,
+    /// Largest principal `request_loan` would accept right now:
+    /// `treasury_balance × max_loan_to_treasury_ratio / 10_000`, or 0 when the
+    /// treasury is empty or negative (staked funds exceeding the token
+    /// balance).
+    pub max_loan: i128,
 }
 
 /// Structured event emitted when a borrower edits loan proposal terms.
